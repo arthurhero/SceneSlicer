@@ -24,7 +24,7 @@ if not os.path.exists(save_folder):
     os.mkdir(save_folder)
 
 #place the camera facing origin at distance from arbitrary location
-def update_camera(camera, distance=1.5):
+def update_camera(camera, distance=1.2):
     pi = 3.14159265
     a = random.randint(0,360)/180*pi
     b = random.randint(0,360)/180*pi
