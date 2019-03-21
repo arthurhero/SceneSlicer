@@ -14,12 +14,10 @@ import numpy as np
 
 NUM = 5
 
-models_folder = '/Users/arthurhero/Desktop/Research/sceneslicer/dataset/ShapeNet/'
+models_folder = '/home/chenziwe/sceneslicer/SceneSlicer/dataset/ShapeNetSubset/'
 synsets = next(os.walk(models_folder))[1]
 
-print(synsets)
-
-save_folder = '/Users/arthurhero/Desktop/Research/sceneslicer/dataset/ShapeNetRendered/'
+save_folder = '/home/chenziwe/sceneslicer/SceneSlicer/dataset/ShapeNetRendered/'
 if not os.path.exists(save_folder):
     os.mkdir(save_folder)
 
@@ -71,7 +69,7 @@ context.scene.render.image_settings.color_mode = 'RGBA'
 context.scene.display_settings.display_device = 'sRGB'
 context.scene.view_settings.view_transform = 'RRT'
 context.scene.render.image_settings.color_depth = '16'
-context.scene.view_settings.exposure = 3
+#context.scene.view_settings.exposure = 2.5
 context.scene.view_settings.gamma = 2.2
 context.scene.render.resolution_x = 128
 context.scene.render.resolution_y = 128
@@ -86,8 +84,6 @@ for s in synsets:
     synset_path = models_folder+s+'/'
     # loop through the models in a synset
     models = next(os.walk(synset_path))[1]
-    print(synset_path)
-    print(models)
     for m in models:
         save_model_path = save_synset_path+m+'/'
         if not os.path.exists(save_model_path):
@@ -99,6 +95,8 @@ for s in synsets:
         object.location.y=0
         object.location.z=0
         for i in range(NUM):
+            e = random.randint(0,10)/10
+            context.scene.view_settings.exposure = 2+e
             update_camera(camera)
             context.scene.render.filepath = save_model_path+str(i)+'.png'
             bpy.ops.render.render(write_still=True)
