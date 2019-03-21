@@ -10,7 +10,7 @@ def under_prob(prob):
     return x<prob*10000
 
 def process_img(img,crop_size=256,resize=False,sample_num=1,
-        alpha=True,pytorch=True,random_mask=False):
+        alpha=True,pytorch=True,random_mask=False,ones_boundary=False):
     '''
     resize img so the shorter edge equal to crop_size if requested or if image too small
     sample sample_num crops from the img with crop_size
@@ -19,6 +19,7 @@ def process_img(img,crop_size=256,resize=False,sample_num=1,
     add randomly mask channel if requested
     normalize img to [-1,1]
     transpose img for pytorch if requested
+    put an all-ones channel between img and mask as boundary if requested
     '''
     batch = list()
     height, width, channel=img.shape
@@ -37,17 +38,20 @@ def process_img(img,crop_size=256,resize=False,sample_num=1,
             img = cv.flip_img_h(img)
         #cv.display_img(img)
         img = img.astype(np.float32)
+        if alpha and channel == 3:
+            alpha_channel = np.ones((crop_size,crop_size,1), dtype=np.float32)
+            img = np.dstack((img,alpha_channel))
+        if random_mask:
+            mask = cv.generate_polygon_mask(crop_size)
+            if ones_boundary:
+                boundary = np.ones((crop_size,crop_size,1), dtype=np.float32)
+                img = np.dstack((img,boundary))
+            img = np.dstack((img, mask))
+        #normalize img to [-1,1]
         img = img/128
         img = img-1
-        if alpha and channel == 3:
-            #we don't have to normalize alpha channel because it will still be all ones
-            alpha_channel = np.ones((crop_size,crop_size,1), dtype=np.float32)
-            img = np.append(img,alpha_channel)
-        if random_mask:
-            #we do not normalize mask
-            mask = cv.generate_polygon_mask(crop_size)
-            img = np.dstack((img, mask))
         if pytorch:
+            #put the channel axis to the front
             img = img.transpose((2, 0, 1))
         batch.append(img)
     return batch
@@ -97,7 +101,7 @@ def save_flist_file(fname,flist,append=False):
         f.write(l+'\n')
     f.close()
 
-def load_all_from_disk(flist,data,img_size=256,resize=False,sample_num=1,alpha=True,pytorch=True,random_mask=False,multi=False,lock=None):
+def load_all_from_disk(flist,data,img_size=256,resize=False,sample_num=1,alpha=True,pytorch=True,random_mask=False,ones_boundary=False,multi=False,lock=None):
     '''
     flist - a list of file path
     data - an empty list to be appended
@@ -106,7 +110,7 @@ def load_all_from_disk(flist,data,img_size=256,resize=False,sample_num=1,alpha=T
     '''
     for f in flist:
         img = cv.load_img(f)
-        imgs = process_img(img,img_size,resize,sample_num,alpha,pytorch,random_mask) 
+        imgs = process_img(img,img_size,resize,sample_num,alpha,pytorch,random_mask,ones_boundary) 
         if multi:
             lock.acquire()
             data.extend(imgs)
@@ -114,7 +118,7 @@ def load_all_from_disk(flist,data,img_size=256,resize=False,sample_num=1,alpha=T
         else:
             data.extend(imgs)
 
-def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,sample_num=1,alpha=True,pytorch=True,random_mask=False):
+def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,sample_num=1,alpha=True,pytorch=True,random_mask=False,ones_boundary=False):
     '''
     multiprocess version
     '''
@@ -127,7 +131,7 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
         end = start+interval
         if i==worker_num-1:
             end = len(flist)
-        args = (flist[start:end],data,img_size,resize,sample_num,alpha,pytorch,random_mask,True,lock,)
+        args = (flist[start:end],data,img_size,resize,sample_num,alpha,pytorch,random_mask,ones_boundary,True,lock)
         t=Thread(target=load_all_from_disk,args=args)
         t.start()
         ts.append(t)
@@ -139,7 +143,7 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
 '''
 TEST CODE
 flist=create_file_list("/Users/arthurhero/Desktop/Research/sceneslicer/dataset/ShapeNetRendered")
-save_flist_file('test.txt',flist,append=False)
+#save_flist_file('test.txt',flist,append=False)
 data = list()
-multi_load_all_from_disk(flist,data,worker_num=5,sample_num=2,alpha=True,pytorch=True,random_mask=True)
+multi_load_all_from_disk(flist,data,worker_num=5,sample_num=2,alpha=True,pytorch=True,random_mask=True,ones_boundary=True)
 '''
