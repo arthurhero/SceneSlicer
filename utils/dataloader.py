@@ -64,7 +64,7 @@ def create_file_list(root_path):
         last_node = queue[-1]
         last = last_node[0]
         expanded = last_node[1]
-        if last[-4:]==".jpg" or last[-4:]==".png":
+        if last[-4:].lower()==".jpg" or last[-4:].lower()==".png":
             fpath=cur_path+last
             flist.append(fpath)
             del queue[-1]
@@ -74,10 +74,10 @@ def create_file_list(root_path):
                 if cur_path[-1]!="/":
                     cur_path+="/"
                 queue[-1]=(last,True)
-                cmd = "ls "+cur_path
+                cmd = "ls -1 "+cur_path
                 process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE)
                 output, error = process.communicate()
-                files=output.split()
+                files=output.splitlines()
                 for f in files:
                     queue.append((f,False))
             else:
@@ -96,6 +96,12 @@ def save_flist_file(fname,flist,append=False):
     for l in flist:
         f.write(l+'\n')
     f.close()
+
+def load_flist_file(fname):
+    f = open(fname, "r")
+    flist = [line.rstrip('\n') for line in f] 
+    f.close()
+    return flist
 
 def load_all_from_disk(flist,data,img_size=256,resize=False,sample_num=1,alpha=True,pytorch=True,random_mask=False,multi=False,lock=None):
     '''
@@ -138,8 +144,11 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
 
 '''
 TEST CODE
-flist=create_file_list("/Users/arthurhero/Desktop/Research/sceneslicer/dataset/ShapeNetRendered")
-save_flist_file('test.txt',flist,append=False)
+flist=create_file_list("/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing")
+save_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt',flist,append=False)
+'''
+flist = load_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt')
 data = list()
-multi_load_all_from_disk(flist,data,worker_num=5,sample_num=2,alpha=True,pytorch=True,random_mask=True)
+multi_load_all_from_disk(flist,data,worker_num=10,sample_num=2,alpha=True,normalize=False,pytorch=False,random_mask=False)
+'''
 '''
