@@ -2,6 +2,10 @@ import cv2
 import numpy as np
 import random
 
+def add_alpha(img):
+    img = cv2.cvtColor(img,cv2.COLOR_RGB2RGBA)
+    return img
+
 def flip_img_b(img):
     img = cv2.flip(img, -1)
     return img
