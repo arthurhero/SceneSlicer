@@ -38,10 +38,10 @@ class SpectralNorm(nn.Module):
         self.module = module
         self.name = name
         self.power_iterations = power_iterations
+        self.module.apply(init_weights)
         # if haven't made u,v before, initialize them
         if not self._made_params():
             self._make_params()
-        self.module.apply(init_weights)
 
     def _update_u_v(self):
         u = getattr(self.module, self.name + "_u")
@@ -56,6 +56,7 @@ class SpectralNorm(nn.Module):
             u.data = l2normalize(torch.mv(w.view(height,-1).data, v.data))
         #calculate u^Twv
         sigma = u.dot(w.view(height,-1).mv(v))
+        #set normalized weight for module
         setattr(self.module, self.name, w / sigma.expand_as(w))
 
     def _made_params(self):
@@ -85,7 +86,7 @@ class SpectralNorm(nn.Module):
         #delete the original weight
         del self.module._parameters[self.name]
 
-        #store vectors for repeated use
+        #store the vectors into the module as parameters 
         self.module.register_parameter(self.name + "_u", u)
         self.module.register_parameter(self.name + "_v", v)
         self.module.register_parameter(self.name + "_bar", w_bar)
@@ -103,15 +104,16 @@ class ContextualAttention(nn.Module):
     (https://github.com/JiahuiYu/generative_inpainting/blob/master/inpaint_ops.py)
     Transferred and modified by me
     '''
-    def __init__(self,patch_size=3,rate=1,fuse_kernel_size=3,softmax_scale=10.,fuse=True):
+    def __init__(self,patch_size=3,rate=1,fuse_kernel_size=3,softmax_scale=10.,fuse=True,device=None):
         super(ContextualAttention, self).__init__()
         self.ps=patch_size
         self.r=rate
         self.fs=fuse_kernel_size
         self.ss=softmax_scale
         self.fuse=fuse
+        self.device=device
 
-    def forward(self, f, b, mask=None):
+    def forward(self, f_o, b_o, mask_o=None):
         '''
         f - foreground feature map (B x c x h x w)
         b - background feature map (B x c x h x w)
@@ -127,22 +129,23 @@ class ContextualAttention(nn.Module):
         pad=tl.calc_padding(ps,1)
         fuse_pad=tl.calc_padding(fs,1)
 
-        B=f.shape[0]
-        c=f.shape[1]
-        h=f.shape[2]
-        w=f.shape[3]
+        B=f_o.shape[0]
+        c=f_o.shape[1]
+        h=f_o.shape[2]
+        w=f_o.shape[3]
 
         #get background patches
         #note that hw/rr is the number of patches from one image
-        bg_patches = F.unfold(b,kernel_size=ps,stride=r,padding=pad) # B x (c x ps x ps) x (hw/rr)
-        bg_patches = bg_patches.view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
-        bg_patches = bg_patches.permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
+        bg_patches = F.unfold(b_o,kernel_size=ps,stride=r,padding=pad) # B x (c x ps x ps) x (hw/rr)
+        bg_patches = bg_patches.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
+        bg_patches = bg_patches.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
         #shrink f and b and mask by rate
-        f = F.interpolate(f, scale_factor=1./r, mode='nearest') # B x c x h/r x w/r
-        b = F.interpolate(b, scale_factor=1./r, mode='nearest') # B x c x h/r x w/r
-        if mask is not None:
-            mask = F.interpolate(mask, scale_factor=1./r, mode='nearest') # B x 1 x h/r x w/r
+        f = F.interpolate(f_o, scale_factor=1./r, mode='nearest') # B x c x h/r x w/r
+        b = F.interpolate(b_o, scale_factor=1./r, mode='nearest') # B x c x h/r x w/r
+        mask=mask_o
+        if mask_o is not None:
+            mask = F.interpolate(mask_o, scale_factor=1./r, mode='nearest') # B x 1 x h/r x w/r
 
         #shrinked size by rate
         hr=f.shape[2]
@@ -150,21 +153,25 @@ class ContextualAttention(nn.Module):
 
         #get shrinked background patches (to be matched with foreground)
         bg_patches_shrinked = F.unfold(b,kernel_size=ps,padding=pad) # B x (c x ps x ps) x (hw/rr)
-        bg_patches_shrinked = bg_patches_shrinked.view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
-        bg_patches_shrinked = bg_patches_shrinked.permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
+        bg_patches_shrinked = bg_patches_shrinked.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
+        bg_patches_shrinked = bg_patches_shrinked.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
         #get patches from mask
         if mask is None:
             mask = torch.zeros(B,1,hr,wr)
+            if self.device is not None:
+                mask=mask.to(self.device)
         mask_patches = F.unfold(mask,kernel_size=ps,padding=pad) # B x (1 x ps x ps) x (hw/rr)
-        mask_patches = mask_patches.view(B,1,ps,ps,-1) # B x 1 x ps x ps x (hw/rr)
-        mask_patches = mask_patches.permute(0,1,4,2,3) # B x 1 x (hw/rr) x ps x ps
-        mask_patches = mask_patches.mean(3,True) # B x 1 x (hw/rr) x 1 x ps
-        mask_patches = mask_patches.mean(4,True) # B x 1 x (hw/rr) x 1 x 1 
-        mask_patches = mask_patches.eq(0.).float() # invert the mask
+        mask_patches = mask_patches.clone().view(B,1,ps,ps,-1) # B x 1 x ps x ps x (hw/rr)
+        mask_patches = mask_patches.clone().permute(0,1,4,2,3) # B x 1 x (hw/rr) x ps x ps
+        mask_patches = mask_patches.clone().mean(3,True) # B x 1 x (hw/rr) x 1 x ps
+        mask_patches = mask_patches.clone().mean(4,True) # B x 1 x (hw/rr) x 1 x 1 
+        mask_patches = mask_patches.clone().eq(0.).float() # invert the mask
 
         #create identity matrices for fusion
         fuse_w = torch.eye(fs).view(1,1,fs,fs) # 1 x 1 x fs x fs
+        if self.device is not None:
+            fuse_w=fuse_w.to(self.device)
 
         results = list()
 
@@ -175,15 +182,18 @@ class ContextualAttention(nn.Module):
         mask_patch_batch = mask_patches.split(1)
 
         for fi,bi,bsi,mi in zip(f_batch,b_patch_batch,b_patch_shrinked_batch,mask_patch_batch):
-            fi=fi.view(1,c,hr,wr) # 1 x c x h/r x w/r
-            bi=bi.view(hr*wr,c,ps,ps)
-            bsi=bsi.view(hr*wr,c,ps,ps)
-            mi=mi.view(1,hr*wr,1,1)
+            fi=fi.clone().view(1,c,hr,wr) # 1 x c x h/r x w/r
+            bi=bi.clone().view(hr*wr,c,ps,ps)
+            bsi=bsi.clone().view(hr*wr,c,ps,ps)
+            mi=mi.clone().view(1,hr*wr,1,1)
 
             bnorm=bsi.pow(2).sum(dim=(1,2,3)).pow(0.5)
-            bnorm=bnorm.max(torch.FloatTensor((1e-4,)).expand_as(bnorm))
+            eps=torch.FloatTensor((1e-4,)).expand_as(bnorm)
+            if self.device is not None:
+                eps=eps.to(self.device)
+            bnorm=bnorm.max(eps)
             bnorm=bnorm.view(-1,1,1,1)
-            bsi=bsi/bnorm # (hw/rr) x c x ps x ps
+            bsi=bsi.clone()/bnorm # (hw/rr) x c x ps x ps
             score=F.conv2d(fi,bsi,stride=1,padding=pad) # 1 x (hw/rr) x h/r x w/r
 
             '''
@@ -191,24 +201,24 @@ class ContextualAttention(nn.Module):
             (https://arxiv.org/abs/1801.07892)
             '''
             if fuse:
-                score=score.view(1,1,hr*wr,hr*wr)
+                score=score.clone().view(1,1,hr*wr,hr*wr)
                 score=F.conv2d(score,fuse_w,stride=1,padding=fuse_pad) # 1 x 1 x (hw/rr) x (hw/rr)
-                score=score.view(1,hr,wr,hr,wr)
-                score=score.permute(0,2,1,4,3)
-                score=score.contiguous().view(1,1,hr*wr,hr*wr)
+                score=score.clone().view(1,hr,wr,hr,wr)
+                score=score.clone().permute(0,2,1,4,3)
+                score=score.clone().contiguous().view(1,1,hr*wr,hr*wr)
                 score=F.conv2d(score,fuse_w,stride=1,padding=fuse_pad)
-                score=score.view(1,wr,hr,wr,hr)
-                score=score.permute(0,2,1,4,3)
-                score=score.contiguous().view(1,hr*wr,hr,wr)
+                score=score.clone().view(1,wr,hr,wr,hr)
+                score=score.clone().permute(0,2,1,4,3)
+                score=score.clone().contiguous().view(1,hr*wr,hr,wr)
 
             #apply mask to zero-out invalid score
-            score *= mi
+            score = score.clone()*mi
             #apply softmax to get actual score (scale is for making score sharper)
-            score = F.softmax(score*ss, dim=1)
-            score *= mi
+            score = F.softmax(score.clone()*ss, dim=1)
+            score = score.clone()*mi
 
             #final step! Copy and paste from bg patches according to the score
-            result = F.conv_transpose2d(score,bi,stride=r)/4. # 1 x c x h x w
+            result = F.conv_transpose2d(score,bi,stride=r,padding=pad,output_padding=1)/4. # 1 x c x h x w
             results.append(result)
 
         out = torch.cat(results)
@@ -266,7 +276,7 @@ class GatedConv2d(nn.Module):
         return out
 
 class PainterNet(nn.Module):
-    def __init__(self,in_channels):
+    def __init__(self,in_channels,device=None):
         super(PainterNet, self).__init__()
 
         #stage 1 (coarse)
@@ -306,7 +316,7 @@ class PainterNet(nn.Module):
         self.xconv3=GatedConv2d(32,64,3,stride=1,padding=pad)
         self.xconv4=GatedConv2d(64,64,3,stride=2,padding=pad)
         self.xconv5=GatedConv2d(64,128,3,stride=1,padding=pad)
-        self.xconv6=GatedConv2d(64,128,3,stride=1,padding=pad)
+        self.xconv6=GatedConv2d(128,128,3,stride=1,padding=pad)
         pad=tl.calc_padding(3,2)
         self.xconv7=GatedConv2d(128,128,3,stride=1,padding=pad,dilation=2)
         pad=tl.calc_padding(3,4)
@@ -317,14 +327,17 @@ class PainterNet(nn.Module):
         self.xconv10=GatedConv2d(128,128,3,stride=1,padding=pad,dilation=16)
         #attention branch
         pad=tl.calc_padding(5,1)
-        self.pmconv1=GatedConv2d(in_channels,32,5,stride=1,padding=pad)
+        self.pmconv1=GatedConv2d(in_channels+2,32,5,stride=1,padding=pad)
         pad=tl.calc_padding(3,1)
         self.pmconv2=GatedConv2d(32,32,3,stride=2,padding=pad)
         self.pmconv3=GatedConv2d(32,64,3,stride=1,padding=pad)
         self.pmconv4=GatedConv2d(64,128,3,stride=2,padding=pad)
         self.pmconv5=GatedConv2d(128,128,3,stride=1,padding=pad)
         self.pmconv6=GatedConv2d(128,128,3,stride=1,padding=pad)
-        self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True)
+        if device is None:
+            self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True)
+        else:
+            self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True,device=device).to(device)
         self.pmconv7=GatedConv2d(128,128,3,stride=1,padding=pad)
         self.pmconv8=GatedConv2d(128,128,3,stride=1,padding=pad)
 
@@ -370,10 +383,10 @@ class PainterNet(nn.Module):
         x=self.conv16(x)
         x=self.conv17(x)
         x=x.clamp(-1.,1.)
-        x_coarse=x
+        x_coarse=x*mask+xin*(mask.eq(0.).float())
 
         #stage 2
-        x=x*mask+xin*(1.-mask)
+        x=x_coarse
         x_cur=torch.cat([x,ones_boundary,mask],dim=1)
         #conv branch
         x=self.xconv1(x_cur)
@@ -395,7 +408,9 @@ class PainterNet(nn.Module):
         x=self.pmconv4(x)
         x=self.pmconv5(x)
         x=self.pmconv6(x)
-        x=self.ca(x)
+        f=x
+        b=x
+        x=self.ca(f,b,mask_s)
         x=self.pmconv7(x)
         x=self.pmconv8(x)
         x_attention=x
@@ -413,11 +428,11 @@ class PainterNet(nn.Module):
         x=self.fconv7(x)
         x=x.clamp(-1.,1.)
 
-        return x
+        return x_coarse,x
 
 
 class SNPatchGAN(nn.Module):
-    def __init__(self,in_channels):
+    def __init__(self,in_channels,device=None):
         super(SNPatchGAN, self).__init__()
         pad=tl.calc_padding(5,1)
         self.conv1=SpectralNorm(nn.Conv2d(in_channels,64,5,stride=1,padding=pad))
@@ -428,17 +443,19 @@ class SNPatchGAN(nn.Module):
         self.conv6=SpectralNorm(nn.Conv2d(256,256,5,stride=2,padding=pad))
 
     def forward(self, x):
+        size=x.shape[2]
+
         x=self.conv1(x)
-        x=nn.LeakyReLU(x)
+        x=F.leaky_relu(x)
         x=self.conv2(x)
-        x=nn.LeakyReLU(x)
+        x=F.leaky_relu(x)
         x=self.conv3(x)
-        x=nn.LeakyReLU(x)
+        x=F.leaky_relu(x)
         x=self.conv4(x)
-        x=nn.LeakyReLU(x)
+        x=F.leaky_relu(x)
         x=self.conv5(x)
-        x=nn.LeakyReLU(x)
+        x=F.leaky_relu(x)
         if size>=256:
             x=self.conv6(x)
-            x=nn.LeakyReLU(x)
+            x=F.leaky_relu(x)
         return x

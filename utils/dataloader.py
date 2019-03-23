@@ -43,6 +43,8 @@ def process_img(img,crop_size=256,resize=False,sample_num=1,
             #opaque alpha 
             alpha_channel = np.ones((crop_size,crop_size,1),img.dtype)*255
             img = np.append(img,alpha_channel,axis=2)
+        elif not alpha and channel == 4:
+            img = img[:,:,0:3]
         if normalize:
             img = img.astype(np.float32)
             img = img/128
@@ -76,7 +78,8 @@ def create_file_list(root_path):
         expanded = last_node[1]
         if last[-4:].lower()==".jpg" or last[-4:].lower()==".png":
             fpath=cur_path+last
-            flist.append(fpath)
+            if cv.load_img(fpath) is not None:
+                flist.append(fpath)
             del queue[-1]
         else:
             if not expanded:
@@ -156,9 +159,9 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
 
 '''
 TEST CODE
+'''
 flist=create_file_list("/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training")
 save_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt',flist,append=False)
-'''
 '''
 flist = load_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt')
 data = list()
