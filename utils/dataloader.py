@@ -156,13 +156,12 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
 
 '''
 TEST CODE
-'''
 flist=create_file_list("/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training")
 save_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt',flist,append=False)
-flist=create_file_list("/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation")
-save_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt',flist,append=False)
 '''
-flist = load_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt')
+'''
+flist = load_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt')
 data = list()
 multi_load_all_from_disk(flist,data,worker_num=1,sample_num=2,alpha=True,normalize=False,pytorch=False,random_mask=False,ones_boundary=False)
+cv.save_img('test2.jpg',data[0])
 '''

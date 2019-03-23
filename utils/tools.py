@@ -1,4 +1,8 @@
+'''
+convenient tools for conv layers
+'''
 
+import numpy as np
 
 def calc_padding(ker_size,dilate_rate):
     '''
