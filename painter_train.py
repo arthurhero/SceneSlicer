@@ -19,12 +19,14 @@ import painter_ops as po
 bg_training_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt'
 bg_validation_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt'
 bg_testing_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt'
-bg_gen_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_gen256.ckpt'
-bg_dis_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_dis256.ckpt'
+bg_gen_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_gen_128.ckpt'
+bg_gen_coarse_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_coarse_gen_128_double_l1.ckpt'
+bg_dis_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_dis_128_double_l1.ckpt'
 ob_training_flist_file=''
 ob_validation_flist_file=''
 ob_testing_flist_file=''
 ob_gen_ckpt_path=''
+ob_gen_coarse_ckpt_path=''
 ob_dis_ckpt_path=''
 
 bg_in_channels=3
@@ -32,9 +34,10 @@ ob_in_channels=4
 gan_iteration=5
 batch_size=16
 img_size=128
-epoch=5
+epoch=1
 lr=1e-4
-l1_alpha=1
+l1_alpha=2
+fm_alpha=1
 patch_alpha=1
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -61,67 +64,122 @@ class ImageDataSet(Dataset):
         img=torch.from_numpy(img)
         return img
 
-def train_bg_painter():
+def train_painter(pretrain=False,fix_coarse=False,ob=False):
+    '''
+    pretrain - whether this is training the coarse part of generator or not
+    ob - whether this is training an object painter instead of a bg painter
+    '''
+    in_channels=3
+    gen_ckpt_path=bg_gen_ckpt_path
+    gen_coarse_ckpt_path=bg_gen_coarse_ckpt_path
+    dis_ckpt_path=bg_dis_ckpt_path
+    training_flist_file=bg_training_flist_file
+    if ob:
+        in_channels=4
+        gen_ckpt_path=ob_gen_ckpt_path
+        gen_coarse_ckpt_path=ob_gen_coarse_ckpt_path
+        dis_ckpt_path=ob_dis_ckpt_path
+        training_flist_file=ob_training_flist_file
     #load dataset
-    dataset=ImageDataSet(bg_training_flist_file,alpha=False)
+    alpha=False
+    if ob:
+        alpha=True
+    dataset=ImageDataSet(training_flist_file,alpha=alpha)
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=8)
-    gennet=po.PainterNet(bg_in_channels,device).to(device)
+    gennet=po.PainterNet(in_channels,pretrain,fix_coarse,device).to(device)
     gennet.train()
-    disnet=po.SNPatchGAN(bg_in_channels,device).to(device)
+    disnet=po.SNPatchGAN(in_channels,device).to(device)
     disnet.train()
     gen_optimizer = torch.optim.Adam(gennet.parameters(),lr=lr,betas=(0.5,0.9))
     dis_optimizer = torch.optim.Adam(disnet.parameters(),lr=lr,betas=(0.5,0.9))
 
     #load checkpoint
-    if os.path.isfile(bg_gen_ckpt_path):
-        gennet.load_state_dict(torch.load(bg_gen_ckpt_path))
-        print("Loaded bg gen ckpt!")
-    if os.path.isfile(bg_dis_ckpt_path):
-        disnet.load_state_dict(torch.load(bg_dis_ckpt_path))
-        print("Loaded bg dis ckpt!")
+    if pretrain:
+        if os.path.isfile(gen_coarse_ckpt_path):
+            gennet.load_state_dict(torch.load(gen_coarse_ckpt_path))
+            print("Loaded coarse gen ckpt!")
+    else:
+        if os.path.isfile(gen_ckpt_path):
+            gennet.load_state_dict(torch.load(gen_ckpt_path))
+            print("Loaded gen ckpt!")
+        else:
+            if os.path.isfile(gen_coarse_ckpt_path):
+                gennet.load_state_dict(torch.load(gen_coarse_ckpt_path))
+                print("Loaded coarse gen ckpt! Training fine from coarse now!")
+    if os.path.isfile(dis_ckpt_path):
+        disnet.load_state_dict(torch.load(dis_ckpt_path))
+        print("Loaded dis ckpt!")
 
     for e in range(epoch):
         step=0
         for i,img_batch in enumerate(dataloader):
             actual_batch_size=img_batch.shape[0]
             img_batch=img_batch.to(device)
-            imgs=img_batch[:,:bg_in_channels]
-            masks=img_batch[:,bg_in_channels:]
+            imgs=img_batch[:,:in_channels]
+            masks=img_batch[:,in_channels:]
             incomplete_imgs=imgs*(masks.eq(0.).float())
 
             #get predictions from generator
-            x_coarse,x=gennet(incomplete_imgs,masks)
-            predictions=x*masks+incomplete_imgs
+            predictions=None
+            x_coarse=None
+            if pretrain:
+                x_coarse=gennet(incomplete_imgs,masks)
+                predictions=x_coarse
+            else:
+                x_coarse,x=gennet(incomplete_imgs,masks)
+                predictions=x*masks+incomplete_imgs
 
             #get score from discriminator
             pos_neg_in=torch.cat([imgs,predictions],dim=0)
-            pos_neg_score=disnet(pos_neg_in)
+            pos_neg_score,pos_neg_feature=disnet(pos_neg_in,masks)
             pos_score=pos_neg_score[:actual_batch_size]
             neg_score=pos_neg_score[actual_batch_size:]
+            pos_feature=pos_neg_feature[:actual_batch_size]
+            neg_feature=pos_neg_feature[actual_batch_size:]
 
             #calculate losses
-            scale_factor=pos_score.shape[2]/float(pos_neg_in.shape[2])
-            mask_s=F.interpolate(masks, scale_factor=scale_factor, mode='bilinear')
+            #scale_factor=pos_score.shape[2]/float(pos_neg_in.shape[2])
+            #mask_s=F.interpolate(masks, scale_factor=scale_factor, mode='bilinear')
             if step%(gan_iteration+1)!=gan_iteration:
                 d_loss_pos=F.relu(torch.ones_like(pos_score)-pos_score)
                 d_loss_neg=F.relu(torch.ones_like(neg_score)+neg_score)
-                d_loss=(d_loss_pos*mask_s).mean()+(d_loss_neg*mask_s).mean()
+                #d_loss=(d_loss_pos*mask_s).mean()+(d_loss_neg*mask_s).mean()
+                d_loss=(d_loss_pos).mean()+(d_loss_neg).mean()
                 dis_optimizer.zero_grad()
                 d_loss.backward()
                 dis_optimizer.step()
+                if step%(gan_iteration+1)==0:
+                    print('Epoch [{}/{}] , Step {}, D_Loss: {:.4f}'
+                            .format(e+1, epoch, step, d_loss.item()))
             else:
-                g_loss=-(neg_score*mask_s).mean()
+                #g_loss=-(neg_score*mask_s).mean()
                 l1_loss=(predictions-imgs).abs().mean()
-                loss=l1_loss*l1_alpha+g_loss*patch_alpha
+                feature_match_loss=(pos_feature-neg_feature).abs().mean()
+                loss=l1_loss*l1_alpha+feature_match_loss*fm_alpha
+                if not pretrain:
+                    g_loss=-(neg_score).mean()
+                    loss+=g_loss*patch_alpha
                 gen_optimizer.zero_grad()
                 loss.backward()
                 gen_optimizer.step()
 
-                torch.save(gennet.state_dict(), bg_gen_ckpt_path)
-                torch.save(disnet.state_dict(), bg_dis_ckpt_path)
-                print('Epoch [{}/{}] , Step {}, Loss: {:.4f}'
+                if pretrain:
+                    torch.save(gennet.state_dict(), gen_coarse_ckpt_path)
+                else:
+                    torch.save(gennet.state_dict(), gen_ckpt_path)
+                torch.save(disnet.state_dict(), dis_ckpt_path)
+                print('Epoch [{}/{}] , Step {}, G_Loss: {:.4f}'
                         .format(e+1, epoch, step, loss.item()))
+                if step%(gan_iteration*10+10)==(gan_iteration*10+9):
+                    sample_orig=tl.recover_img(imgs[0])
+                    sample_incomplete=tl.recover_img(incomplete_imgs[0])
+                    sample_coarse=tl.recover_img(x_coarse[0])
+                    sample_predicted=tl.recover_img(predictions[0])
+                    cv.display_img(sample_orig)
+                    cv.display_img(sample_incomplete)
+                    cv.display_img(sample_coarse)
+                    cv.display_img(sample_predicted)
 
             step+=1
 
-train_bg_painter()
+train_painter(pretrain=True)

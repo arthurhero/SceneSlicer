@@ -24,6 +24,10 @@ def init_weights(m):
         nn.init.xavier_uniform_(m.weight)
         m.bias.data.fill_(0.01)
 
+def freeze_params(m):
+    for param in m.parameters():
+        param.requires_grad = False
+
 class SpectralNorm(nn.Module):
     '''
     Original Idea see paper by Miyato et. al.
@@ -136,7 +140,8 @@ class ContextualAttention(nn.Module):
 
         #get background patches
         #note that hw/rr is the number of patches from one image
-        bg_patches = F.unfold(b_o,kernel_size=ps,stride=r,padding=pad) # B x (c x ps x ps) x (hw/rr)
+        b_o = F.pad(b_o,(pad,pad,pad,pad),mode='replicate')
+        bg_patches = F.unfold(b_o,kernel_size=ps,stride=r,padding=0) # B x (c x ps x ps) x (hw/rr)
         bg_patches = bg_patches.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
         bg_patches = bg_patches.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
@@ -152,7 +157,8 @@ class ContextualAttention(nn.Module):
         wr=f.shape[3]
 
         #get shrinked background patches (to be matched with foreground)
-        bg_patches_shrinked = F.unfold(b,kernel_size=ps,padding=pad) # B x (c x ps x ps) x (hw/rr)
+        b = F.pad(b,(pad,pad,pad,pad),mode='replicate')
+        bg_patches_shrinked = F.unfold(b,kernel_size=ps,padding=0) # B x (c x ps x ps) x (hw/rr)
         bg_patches_shrinked = bg_patches_shrinked.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
         bg_patches_shrinked = bg_patches_shrinked.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
@@ -218,7 +224,10 @@ class ContextualAttention(nn.Module):
             score = score.clone()*mi
 
             #final step! Copy and paste from bg patches according to the score
-            result = F.conv_transpose2d(score,bi,stride=r,padding=pad,output_padding=1)/4. # 1 x c x h x w
+            result = F.conv_transpose2d(score,bi,stride=r,padding=pad)/4. # 1 x c x h x w
+            if result.shape[2]%2==1:
+                #if the output has odd size, pad 1 row/col to right/bottom
+                result = F.pad(result,(0,1,0,1),mode='replicate')
             results.append(result)
 
         out = torch.cat(results)
@@ -256,28 +265,40 @@ class GatedConv2d(nn.Module):
     Original idea by Yu et. al.
     (https://arxiv.org/abs/1806.03589)
     '''
-    def __init__(self,in_channels,out_channels,kernel_size,stride=1,padding=0,dilation=1,groups=1,bias=True):
+    def __init__(self,in_channels,out_channels,kernel_size,stride=1,padding=0,dilation=1,groups=1,bias=True,activation=True):
+        self.activation=activation
+        self.padding=padding
         super(GatedConv2d, self).__init__()
-        self.conv_layer=nn.Sequential(
-                nn.Conv2d(in_channels,out_channels,kernel_size,stride,padding,dilation,groups,bias),
-                nn.LeakyReLU()
-                )
+        self.conv_layer=None
+        if activation:
+            self.conv_layer=nn.Sequential(
+                    nn.Conv2d(in_channels,out_channels,kernel_size,stride,0,dilation,groups,bias),
+                    nn.LeakyReLU()
+                    )
+        else:
+            self.conv_layer=nn.Conv2d(in_channels,out_channels,kernel_size,stride,0,dilation,groups,bias)
         self.gate_layer=nn.Sequential(
-                nn.Conv2d(in_channels,out_channels,kernel_size,stride,padding,dilation,groups,bias),
+                nn.Conv2d(in_channels,out_channels,kernel_size,stride,0,dilation,groups,bias),
                 nn.Sigmoid()
                 )
         self.conv_layer.apply(init_weights)
         self.gate_layer.apply(init_weights)
 
     def forward(self, x):
+        pad=self.padding
+        x=F.pad(x,(pad,pad,pad,pad),mode='replicate')
         x1=self.conv_layer(x)
-        x2=self.gate_layer(x)
-        out = x1*x2
-        return out
+        if activation:
+            x2=self.gate_layer(x)
+            out = x1*x2
+            return out
+        else:
+            return x1
 
 class PainterNet(nn.Module):
-    def __init__(self,in_channels,device=None):
+    def __init__(self,in_channels,pretrain=False,fix_coarse=False,device=None):
         super(PainterNet, self).__init__()
+        self.pretrain=pretrain
 
         #stage 1 (coarse)
         pad=tl.calc_padding(5,1)
@@ -304,8 +325,26 @@ class PainterNet(nn.Module):
         self.conv14=GatedConv2d(64,64,3,stride=1,padding=pad)
         self.conv15=GatedConv2d(64,32,3,stride=1,padding=pad)
         self.conv16=GatedConv2d(32,16,3,stride=1,padding=pad)
-        self.conv17=nn.Conv2d(16,in_channels,3,stride=1,padding=pad)
-        self.conv17.apply(init_weights)
+        self.conv17=GatedConv2d(16,in_channels,3,stride=1,padding=pad,activation=False)
+
+        if fix_coarse:
+            self.conv1.apply(freeze_params)
+            self.conv2.apply(freeze_params)
+            self.conv3.apply(freeze_params)
+            self.conv4.apply(freeze_params)
+            self.conv5.apply(freeze_params)
+            self.conv6.apply(freeze_params)
+            self.conv7.apply(freeze_params)
+            self.conv8.apply(freeze_params)
+            self.conv9.apply(freeze_params)
+            self.conv10.apply(freeze_params)
+            self.conv11.apply(freeze_params)
+            self.conv12.apply(freeze_params)
+            self.conv13.apply(freeze_params)
+            self.conv14.apply(freeze_params)
+            self.conv15.apply(freeze_params)
+            self.conv16.apply(freeze_params)
+            self.conv17.apply(freeze_params)
 
         #stage 2 (fine)
         #conv branch
@@ -348,8 +387,7 @@ class PainterNet(nn.Module):
         self.fconv4=GatedConv2d(64,64,3,stride=1,padding=pad)
         self.fconv5=GatedConv2d(64,32,3,stride=1,padding=pad)
         self.fconv6=GatedConv2d(32,16,3,stride=1,padding=pad)
-        self.fconv7=nn.Conv2d(16,in_channels,3,stride=1,padding=pad)
-        self.fconv7.apply(init_weights)
+        self.fconv7=GatedConv2d(16,in_channels,3,stride=1,padding=pad,activation=False)
 
     def forward(self, x, mask):
         '''
@@ -371,8 +409,8 @@ class PainterNet(nn.Module):
         x=self.conv7(x)
         x=self.conv8(x)
         x=self.conv9(x)
-        if size>=256:
-            x=self.conv10(x)
+        #if size>=256:
+        x=self.conv10(x)
         x=self.conv11(x)
         x=self.conv12(x)
         x=F.interpolate(x, scale_factor=2, mode='nearest')
@@ -385,66 +423,71 @@ class PainterNet(nn.Module):
         x=x.clamp(-1.,1.)
         x_coarse=x*mask+xin*(mask.eq(0.).float())
 
-        #stage 2
-        x=x_coarse
-        x_cur=torch.cat([x,ones_boundary,mask],dim=1)
-        #conv branch
-        x=self.xconv1(x_cur)
-        x=self.xconv2(x)
-        x=self.xconv3(x)
-        x=self.xconv4(x)
-        x=self.xconv5(x)
-        x=self.xconv6(x)
-        x=self.xconv7(x)
-        x=self.xconv8(x)
-        x=self.xconv9(x)
-        if size>=256:
+        if self.pretrain:
+            return x_coarse
+        else:
+            #stage 2
+            x=x_coarse
+            x_cur=torch.cat([x,ones_boundary,mask],dim=1)
+            #conv branch
+            x=self.xconv1(x_cur)
+            x=self.xconv2(x)
+            x=self.xconv3(x)
+            x=self.xconv4(x)
+            x=self.xconv5(x)
+            x=self.xconv6(x)
+            x=self.xconv7(x)
+            x=self.xconv8(x)
+            x=self.xconv9(x)
+            #if size>=256:
             x=self.xconv10(x)
-        x_conv=x
-        #attention branch
-        x=self.pmconv1(x_cur)
-        x=self.pmconv2(x)
-        x=self.pmconv3(x)
-        x=self.pmconv4(x)
-        x=self.pmconv5(x)
-        x=self.pmconv6(x)
-        f=x
-        b=x
-        x=self.ca(f,b,mask_s)
-        x=self.pmconv7(x)
-        x=self.pmconv8(x)
-        x_attention=x
-
-        #last stage
-        x=torch.cat([x_conv,x_attention],dim=1)
-        x=self.fconv1(x)
-        x=self.fconv2(x)
-        x=F.interpolate(x, scale_factor=2, mode='nearest')
-        x=self.fconv3(x)
-        x=self.fconv4(x)
-        x=F.interpolate(x, scale_factor=2, mode='nearest')
-        x=self.fconv5(x)
-        x=self.fconv6(x)
-        x=self.fconv7(x)
-        x=x.clamp(-1.,1.)
-
-        return x_coarse,x
+            x_conv=x
+            #attention branch
+            x=self.pmconv1(x_cur)
+            x=self.pmconv2(x)
+            x=self.pmconv3(x)
+            x=self.pmconv4(x)
+            x=self.pmconv5(x)
+            x=self.pmconv6(x)
+            f=x
+            b=x
+            x=self.ca(f,b,mask_s)
+            x=self.pmconv7(x)
+            x=self.pmconv8(x)
+            x_attention=x
+         
+            #last stage
+            x=torch.cat([x_conv,x_attention],dim=1)
+            x=self.fconv1(x)
+            x=self.fconv2(x)
+            x=F.interpolate(x, scale_factor=2, mode='nearest')
+            x=self.fconv3(x)
+            x=self.fconv4(x)
+            x=F.interpolate(x, scale_factor=2, mode='nearest')
+            x=self.fconv5(x)
+            x=self.fconv6(x)
+            x=self.fconv7(x)
+            x=x.clamp(-1.,1.)
+         
+            return x_coarse,x
 
 
 class SNPatchGAN(nn.Module):
     def __init__(self,in_channels,device=None):
         super(SNPatchGAN, self).__init__()
         pad=tl.calc_padding(5,1)
-        self.conv1=SpectralNorm(nn.Conv2d(in_channels,64,5,stride=1,padding=pad))
+        self.conv1=SpectralNorm(nn.Conv2d(in_channels+2,64,5,stride=1,padding=pad))
         self.conv2=SpectralNorm(nn.Conv2d(64,128,5,stride=2,padding=pad))
         self.conv3=SpectralNorm(nn.Conv2d(128,256,5,stride=2,padding=pad))
         self.conv4=SpectralNorm(nn.Conv2d(256,256,5,stride=2,padding=pad))
         self.conv5=SpectralNorm(nn.Conv2d(256,256,5,stride=2,padding=pad))
         self.conv6=SpectralNorm(nn.Conv2d(256,256,5,stride=2,padding=pad))
 
-    def forward(self, x):
+    def forward(self, x, mask):
+        double_mask=torch.cat([mask,mask],dim=0)
+        ones_boundary = torch.ones_like(double_mask)
+        x=torch.cat([x,ones_boundary,double_mask],dim=1)
         size=x.shape[2]
-
         x=self.conv1(x)
         x=F.leaky_relu(x)
         x=self.conv2(x)
@@ -453,9 +496,9 @@ class SNPatchGAN(nn.Module):
         x=F.leaky_relu(x)
         x=self.conv4(x)
         x=F.leaky_relu(x)
+        feature=x
         x=self.conv5(x)
         x=F.leaky_relu(x)
-        if size>=256:
-            x=self.conv6(x)
-            x=F.leaky_relu(x)
-        return x
+        x=self.conv6(x)
+        x=F.leaky_relu(x)
+        return x,feature
