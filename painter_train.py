@@ -19,9 +19,9 @@ import painter_ops as po
 bg_training_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt'
 bg_validation_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt'
 bg_testing_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt'
-bg_gen_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_gen_128.ckpt'
-bg_gen_coarse_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_coarse_gen_128_double_l1.ckpt'
-bg_dis_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_dis_128_double_l1.ckpt'
+bg_gen_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_gen_128_pad_rep_freeze.ckpt'
+bg_gen_coarse_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_coarse_gen_128_pad_rep_freeze.ckpt'
+bg_dis_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_dis_128_pad_rep_freeze.ckpt'
 ob_training_flist_file=''
 ob_validation_flist_file=''
 ob_testing_flist_file=''
@@ -34,11 +34,12 @@ ob_in_channels=4
 gan_iteration=5
 batch_size=16
 img_size=128
-epoch=1
+epoch=2
 lr=1e-4
-l1_alpha=2
-fm_alpha=1
-patch_alpha=1
+l1_alpha=1
+l1_coarse_alpha=0
+fm_alpha=0
+patch_alpha=0.1
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -113,6 +114,15 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
     for e in range(epoch):
         step=0
         for i,img_batch in enumerate(dataloader):
+            train_g=False
+            if pretrain or step%(gan_iteration+1)==gan_iteration:
+                #if False:
+                train_g=True
+                disnet.apply(po.freeze_params)
+                gennet.apply(po.unfreeze_params)
+            else:
+                disnet.apply(po.unfreeze_params)
+                gennet.apply(po.freeze_params)
             actual_batch_size=img_batch.shape[0]
             img_batch=img_batch.to(device)
             imgs=img_batch[:,:in_channels]
@@ -138,12 +148,9 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
             neg_feature=pos_neg_feature[actual_batch_size:]
 
             #calculate losses
-            #scale_factor=pos_score.shape[2]/float(pos_neg_in.shape[2])
-            #mask_s=F.interpolate(masks, scale_factor=scale_factor, mode='bilinear')
-            if step%(gan_iteration+1)!=gan_iteration:
+            if not train_g:
                 d_loss_pos=F.relu(torch.ones_like(pos_score)-pos_score)
                 d_loss_neg=F.relu(torch.ones_like(neg_score)+neg_score)
-                #d_loss=(d_loss_pos*mask_s).mean()+(d_loss_neg*mask_s).mean()
                 d_loss=(d_loss_pos).mean()+(d_loss_neg).mean()
                 dis_optimizer.zero_grad()
                 d_loss.backward()
@@ -152,13 +159,15 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
                     print('Epoch [{}/{}] , Step {}, D_Loss: {:.4f}'
                             .format(e+1, epoch, step, d_loss.item()))
             else:
-                #g_loss=-(neg_score*mask_s).mean()
                 l1_loss=(predictions-imgs).abs().mean()
                 feature_match_loss=(pos_feature-neg_feature).abs().mean()
                 loss=l1_loss*l1_alpha+feature_match_loss*fm_alpha
+                if not fix_coarse:
+                    l1_coarse_loss=(x_coarse-imgs).abs().mean()
+                    loss+=l1_coarse_loss*l1_coarse_alpha
                 if not pretrain:
                     g_loss=-(neg_score).mean()
-                    loss+=g_loss*patch_alpha
+                    loss+=(g_loss*patch_alpha)
                 gen_optimizer.zero_grad()
                 loss.backward()
                 gen_optimizer.step()
@@ -170,16 +179,20 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
                 torch.save(disnet.state_dict(), dis_ckpt_path)
                 print('Epoch [{}/{}] , Step {}, G_Loss: {:.4f}'
                         .format(e+1, epoch, step, loss.item()))
-                if step%(gan_iteration*10+10)==(gan_iteration*10+9):
-                    sample_orig=tl.recover_img(imgs[0])
-                    sample_incomplete=tl.recover_img(incomplete_imgs[0])
-                    sample_coarse=tl.recover_img(x_coarse[0])
-                    sample_predicted=tl.recover_img(predictions[0])
-                    cv.display_img(sample_orig)
-                    cv.display_img(sample_incomplete)
-                    cv.display_img(sample_coarse)
-                    cv.display_img(sample_predicted)
+
+                '''
+                sample_orig=tl.recover_img(imgs[0])
+                sample_incomplete=tl.recover_img(incomplete_imgs[0])
+                sample_coarse=tl.recover_img(x_coarse[0])
+                sample_predicted=tl.recover_img(predictions[0])
+                cv.display_img(sample_orig)
+                cv.display_img(sample_incomplete)
+                cv.display_img(sample_coarse)
+                cv.display_img(sample_predicted)
+                if step/gan_iteration>1:
+                    break
+                    '''
 
             step+=1
 
-train_painter(pretrain=True)
+train_painter(fix_coarse=True)

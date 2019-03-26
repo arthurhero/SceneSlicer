@@ -51,7 +51,7 @@ def process_img(img,crop_size=256,resize=False,sample_num=1,
             img = img-1
         # we do not normalize mask
         if random_mask:
-            mask = cv.generate_polygon_mask(crop_size)
+            mask = cv.generate_polygon_mask(crop_size,crop_size)
             mask = mask.astype(img.dtype)
             if ones_boundary:
                 boundary = np.ones((crop_size,crop_size,1), dtype=img.dtype)
@@ -159,9 +159,9 @@ def multi_load_all_from_disk(flist,data,worker_num=1,img_size=256,resize=False,s
 
 '''
 TEST CODE
-'''
 flist=create_file_list("/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training")
 save_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt',flist,append=False)
+'''
 '''
 flist = load_flist_file('/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt')
 data = list()

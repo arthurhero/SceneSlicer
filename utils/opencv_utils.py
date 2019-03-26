@@ -40,7 +40,7 @@ def display_img_file(fname):
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-def generate_random_vertices(size=128,num_min=3,num_max=6,dis_max_ratio=0.5):
+def generate_random_vertices(height=128,width=128,num_min=3,num_max=6,dis_max_ratio=0.5):
     '''
     generates an array of points for a polygon to be drawn on a square
     mask of size size.
@@ -48,11 +48,11 @@ def generate_random_vertices(size=128,num_min=3,num_max=6,dis_max_ratio=0.5):
     dis_max_ratio indicates the maximum distance between the coordinates of 
     two consecutive points w.r.t size
     '''
-    dis_max = round(dis_max_ratio*size)
+    dis_max = round(dis_max_ratio*min(height,width))
     num = random.randint(0,num_max-num_min+1)+num_min
     pts = list()
-    x=random.randint(0,size+1)
-    y=random.randint(0,size+1)
+    x=random.randint(0,width)
+    y=random.randint(0,height)
     pts.append([x,y])
     for i in range(num):
         x_off=random.randint(0,dis_max*2+1)-dis_max
@@ -63,13 +63,14 @@ def generate_random_vertices(size=128,num_min=3,num_max=6,dis_max_ratio=0.5):
     pts = np.asarray(pts, dtype=np.int32)
     return pts
 
-def generate_polygon_mask(size=128):
+def generate_polygon_mask(height=128,width=128,pts=None):
     '''
     generates a random polygon mask on canvas of size size
     0 for non-mask area and 1 for mask
     '''
-    mask = np.zeros((size,size,1),np.float32)
-    pts = generate_random_vertices(size)
+    mask = np.zeros((height,width,1),np.float32)
+    if pts is None:
+        pts = generate_random_vertices(height,width)
     pts = pts.reshape((-1,1,2))
     cv2.fillPoly(mask, [pts], 1)
     return mask

@@ -28,6 +28,10 @@ def freeze_params(m):
     for param in m.parameters():
         param.requires_grad = False
 
+def unfreeze_params(m):
+    for param in m.parameters():
+        param.requires_grad = True 
+
 class SpectralNorm(nn.Module):
     '''
     Original Idea see paper by Miyato et. al.
@@ -140,8 +144,8 @@ class ContextualAttention(nn.Module):
 
         #get background patches
         #note that hw/rr is the number of patches from one image
-        b_o = F.pad(b_o,(pad,pad,pad,pad),mode='replicate')
-        bg_patches = F.unfold(b_o,kernel_size=ps,stride=r,padding=0) # B x (c x ps x ps) x (hw/rr)
+        b_o_pad = F.pad(b_o,(pad,pad,pad,pad),mode='replicate')
+        bg_patches = F.unfold(b_o_pad,kernel_size=ps,stride=r,padding=0) # B x (c x ps x ps) x (hw/rr)
         bg_patches = bg_patches.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
         bg_patches = bg_patches.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
@@ -157,8 +161,8 @@ class ContextualAttention(nn.Module):
         wr=f.shape[3]
 
         #get shrinked background patches (to be matched with foreground)
-        b = F.pad(b,(pad,pad,pad,pad),mode='replicate')
-        bg_patches_shrinked = F.unfold(b,kernel_size=ps,padding=0) # B x (c x ps x ps) x (hw/rr)
+        b_pad = F.pad(b,(pad,pad,pad,pad),mode='replicate')
+        bg_patches_shrinked = F.unfold(b_pad,kernel_size=ps,padding=0) # B x (c x ps x ps) x (hw/rr)
         bg_patches_shrinked = bg_patches_shrinked.clone().view(B,c,ps,ps,-1) # B x c x ps x ps x (hw/rr)
         bg_patches_shrinked = bg_patches_shrinked.clone().permute(0,4,1,2,3) # B x (hw/rr) x c x ps x ps
 
@@ -288,7 +292,7 @@ class GatedConv2d(nn.Module):
         pad=self.padding
         x=F.pad(x,(pad,pad,pad,pad),mode='replicate')
         x1=self.conv_layer(x)
-        if activation:
+        if self.activation:
             x2=self.gate_layer(x)
             out = x1*x2
             return out
@@ -299,6 +303,7 @@ class PainterNet(nn.Module):
     def __init__(self,in_channels,pretrain=False,fix_coarse=False,device=None):
         super(PainterNet, self).__init__()
         self.pretrain=pretrain
+        self.fix_coarse=fix_coarse
 
         #stage 1 (coarse)
         pad=tl.calc_padding(5,1)
@@ -326,25 +331,6 @@ class PainterNet(nn.Module):
         self.conv15=GatedConv2d(64,32,3,stride=1,padding=pad)
         self.conv16=GatedConv2d(32,16,3,stride=1,padding=pad)
         self.conv17=GatedConv2d(16,in_channels,3,stride=1,padding=pad,activation=False)
-
-        if fix_coarse:
-            self.conv1.apply(freeze_params)
-            self.conv2.apply(freeze_params)
-            self.conv3.apply(freeze_params)
-            self.conv4.apply(freeze_params)
-            self.conv5.apply(freeze_params)
-            self.conv6.apply(freeze_params)
-            self.conv7.apply(freeze_params)
-            self.conv8.apply(freeze_params)
-            self.conv9.apply(freeze_params)
-            self.conv10.apply(freeze_params)
-            self.conv11.apply(freeze_params)
-            self.conv12.apply(freeze_params)
-            self.conv13.apply(freeze_params)
-            self.conv14.apply(freeze_params)
-            self.conv15.apply(freeze_params)
-            self.conv16.apply(freeze_params)
-            self.conv17.apply(freeze_params)
 
         #stage 2 (fine)
         #conv branch
@@ -377,6 +363,7 @@ class PainterNet(nn.Module):
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True)
         else:
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True,device=device).to(device)
+        freeze_params(self.ca)
         self.pmconv7=GatedConv2d(128,128,3,stride=1,padding=pad)
         self.pmconv8=GatedConv2d(128,128,3,stride=1,padding=pad)
 
@@ -394,6 +381,27 @@ class PainterNet(nn.Module):
         x - B x c x h x w
         mask - B x 1 x h x w
         '''
+        #freeze some layers
+        freeze_params(self.ca)
+        if self.fix_coarse:
+            self.conv1.apply(freeze_params)
+            self.conv2.apply(freeze_params)
+            self.conv3.apply(freeze_params)
+            self.conv4.apply(freeze_params)
+            self.conv5.apply(freeze_params)
+            self.conv6.apply(freeze_params)
+            self.conv7.apply(freeze_params)
+            self.conv8.apply(freeze_params)
+            self.conv9.apply(freeze_params)
+            self.conv10.apply(freeze_params)
+            self.conv11.apply(freeze_params)
+            self.conv12.apply(freeze_params)
+            self.conv13.apply(freeze_params)
+            self.conv14.apply(freeze_params)
+            self.conv15.apply(freeze_params)
+            self.conv16.apply(freeze_params)
+            self.conv17.apply(freeze_params)
+
         xin = x
         ones_boundary = torch.ones_like(mask)
         x=torch.cat([x,ones_boundary,mask],dim=1)
