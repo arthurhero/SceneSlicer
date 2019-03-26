@@ -16,12 +16,12 @@ import utils.dataloader as dl
 
 import painter_ops as po
 
-bg_training_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/training.txt'
-bg_validation_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/validation.txt'
-bg_testing_flist_file='/home/chenziwe/sceneslicer/SceneSlicer/dataset/MITindoor/Images/testing.txt'
-bg_gen_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_gen_128_pad_rep_freeze.ckpt'
-bg_gen_coarse_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_coarse_gen_128_pad_rep_freeze.ckpt'
-bg_dis_ckpt_path='/home/chenziwe/sceneslicer/SceneSlicer/logs/bg_dis_128_pad_rep_freeze.ckpt'
+bg_training_flist_file='dataset/MITindoor/Images/training.txt'
+bg_validation_flist_file='dataset/MITindoor/Images/validation.txt'
+bg_testing_flist_file='dataset/MITindoor/Images/testing.txt'
+bg_gen_ckpt_path='logs/bg_gen_128_pad_rep_freeze.ckpt'
+bg_gen_coarse_ckpt_path='logs/bg_coarse_gen_128_pad_rep_freeze.ckpt'
+bg_dis_ckpt_path='logs/bg_dis_128_pad_rep_freeze.ckpt'
 ob_training_flist_file=''
 ob_validation_flist_file=''
 ob_testing_flist_file=''
@@ -34,12 +34,12 @@ ob_in_channels=4
 gan_iteration=5
 batch_size=16
 img_size=128
-epoch=2
+epoch=100
 lr=1e-4
 l1_alpha=1
 l1_coarse_alpha=0
 fm_alpha=0
-patch_alpha=0.1
+patch_alpha=0.03
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -195,4 +195,4 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
 
             step+=1
 
-train_painter(fix_coarse=True)
+train_painter()

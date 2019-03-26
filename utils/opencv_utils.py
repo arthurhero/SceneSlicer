@@ -40,6 +40,11 @@ def display_img_file(fname):
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+def bbox_img(img,x,y,w,h):
+    ret=img.copy()
+    cv2.rectangle(ret,(x,y),(x+w,y+h),(255,0,0),2)
+    return ret
+
 def generate_random_vertices(height=128,width=128,num_min=3,num_max=6,dis_max_ratio=0.5):
     '''
     generates an array of points for a polygon to be drawn on a square
