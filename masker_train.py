@@ -3,6 +3,8 @@ A network similar to Mask R-CNN using Feature Pyramid Networks (FPN)
 It takes in an square image and generates K object masks (each mask is of img size)
 '''
 
+visualize=False
+
 import os
 import sys
 import time
@@ -17,8 +19,8 @@ import utils.tools as tl
 
 import masker_ops as mo
 
-img_size=512 #size of input img
-batch_size=2
+img_size=256 #size of input img
+batch_size=1
 epoch=5
 lr=0.02
 sgd_momentum=0.9
@@ -27,13 +29,13 @@ weight_decay=0.0001
 MAX_ANN_PER_IMG=30
 
 k=200 #maximum number of masks from one img
-nms_threshold=0.5
-pos_threshold=0.5
+nms_threshold=0.7
+pos_threshold=0.7
 sample_size=512
-fh=14 #input feature patch size to mask generator
-fw=14
-mh=28 #output mask size of mask generator
-mw=28
+fh=16 #input feature patch size to mask generator
+fw=16
+mh=128 #output mask size of mask generator
+mw=128
 
 masker_ckpt_path='logs/masker.ckpt'
 
@@ -187,7 +189,7 @@ def train_masker():
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=batch_size)
 
     #modules
-    mask_rcnn=mo.MaskRCNN(k,nms_threshold,img_size,img_size,fh,fw,mh,mw,device).to(device)
+    mask_rcnn=mo.MaskRCNN(k,nms_threshold,img_size,img_size,fh,fw,mh,mw,device,visualize).to(device)
     mask_rcnn.train()
     label_assigner=mo.AssignClsLabel(pos_threshold).to(device)
     optimizer = torch.optim.SGD(mask_rcnn.parameters(),lr=lr,momentum=sgd_momentum,weight_decay=weight_decay)
@@ -225,7 +227,7 @@ def train_masker():
                 labels_f=label_assigner(bboxess_f,gt_bboxess,gt_counts,prop_counts) #get labels for filtered proposals
                 if labels_f is not None:
                     sample_idxs_f,sample_counts_f=mo.sample_proposals(labels_f,sample_size,prop_counts) #sample pos from fil
-                    l_mask=mo.calc_mask_loss(bboxess_f,maskss_f,prop_counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs_f,sample_counts_f,visualize=True)
+                    l_mask=mo.calc_mask_loss(bboxess_f,maskss_f,prop_counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs_f,sample_counts_f,visualize=visualize)
                     loss=loss+l_mask
             optimizer.zero_grad()
             loss.backward()

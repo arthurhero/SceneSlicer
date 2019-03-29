@@ -57,13 +57,13 @@ class FeaturePyramidNet(nn.Module):
         c5=x
 
         m5=self.reduce5(c5)
-        m5up=F.interpolate(m5,scale_factor=2.,mode='nearest')
+        m5up=F.interpolate(m5,scale_factor=2.,mode='bilinear')
         c4reduce=self.reduce4(c4)
         m4=c4reduce+m5up
-        m4up=F.interpolate(m4,scale_factor=2.,mode='nearest')
+        m4up=F.interpolate(m4,scale_factor=2.,mode='bilinear')
         c3reduce=self.reduce3(c3)
         m3=c3reduce+m4up
-        m3up=F.interpolate(m3,scale_factor=2.,mode='nearest')
+        m3up=F.interpolate(m3,scale_factor=2.,mode='bilinear')
         c2reduce=self.reduce2(c2)
         m2=c2reduce+m3up
 
@@ -80,7 +80,7 @@ class RPNHead(nn.Module):
         super(RPNHead, self).__init__()
         '''
         3 anchors per feature level for aspect ratio 1:2,1:1,2:1
-        img size on p6,p5,p4,p3,p2 are 512,256,128,56,32 respectively
+        img size on p6,p5,p4,p3,p2 are ih,ih/2,ih/4,ih/8,ih/16 respectively
         '''
         self.rpn_conv=nn.Conv2d(256,256,kernel_size=3,padding=1)
         self.bn1=nn.BatchNorm2d(256)
@@ -97,9 +97,9 @@ class RPNHead(nn.Module):
         p=self.bn1(p)
         p=F.relu(p)
         p_cls_score=self.rpn_cls_score(p) # B x (3*2) x h x w
-        p_cls_score=self.bnc(p_cls_score)
+        #p_cls_score=self.bnc(p_cls_score)
         p_bbox_pred=self.rpn_bbox_pred(p) # B x (3*4) x h x w
-        p_bbox_pred=self.bnb(p_bbox_pred)
+        #p_bbox_pred=self.bnb(p_bbox_pred)
         #bbox returns dy, dx, log(h), log(w) wrt anchor
         return p_cls_score,p_bbox_pred 
 
@@ -343,7 +343,8 @@ class ROIAlign(nn.Module):
         img_area=area.new(1).float()
         img_area[0]=img_h*img_w
         ret=6+(area.pow(0.5)/img_area.pow(0.5)).log2()
-        ret=ret.clone().clamp(2,6).floor().long()
+        #use p5 for all p6 level features
+        ret=ret.clone().clamp(2,5).round().long()
         return ret
 
 
@@ -406,28 +407,29 @@ class MaskGenerator(nn.Module):
         '''
         Given cropped features B x K x 256 x fh x fw
         and counts B x 1
-        return predicted masks B x K x 1 x mh x mw (sigmoided)
+        return predicted masks B x K x 1 x mh x mw
         '''
         self.conv1=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(256),
+                nn.Conv2d(256,128,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(128),
                 nn.ReLU())
         self.conv2=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(256),
+                nn.Conv2d(128,64,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(64),
                 nn.ReLU())
         self.conv3=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(256),
+                nn.Conv2d(64,32,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(32),
                 nn.ReLU())
         self.conv4=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(256),
+                nn.Conv2d(32,16,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(16),
                 nn.ReLU())
-        self.upsample=nn.ConvTranspose2d(256,256,kernel_size=2,stride=2)
-        self.mg=nn.Conv2d(256,1,kernel_size=1,stride=1)
+        #self.upsample=nn.ConvTranspose2d(32,32,kernel_size=2,stride=2)
+        self.mg=nn.Conv2d(16,1,kernel_size=1,stride=1)
+        self.bn=nn.BatchNorm2d(1)
 
-    def forward(self,featuress,counts,fh=16,fw=16,mh=32,mw=32):
+    def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
         features_batch=torch.split(featuress,1)
         count_batch=torch.split(counts,1)
         maskss=list()
@@ -437,13 +439,17 @@ class MaskGenerator(nn.Module):
             count=count[0]
             features=features[:count] # k x 256 x fh x fw
             features=self.conv1(features)
+            features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv2(features)
+            features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv3(features)
+            features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv4(features)
-            features=self.upsample(features)
+            #features=self.upsample(features)
             features=self.mg(features)
-            features=torch.sigmoid(features) # k x 1 x 2*fh x 2*fw
-            masks_valid=F.interpolate(features,size=(mh,mw)) # k x 1 x mh x mw
+            #features=self.bn(features)
+            features=torch.sigmoid(features)
+            masks_valid=F.interpolate(features,size=(mh,mw),mode='bilinear') # k x 1 x mh x mw
             masks[:count]=masks_valid
             masks=masks.unsqueeze(0)
             maskss.append(masks)
@@ -499,7 +505,7 @@ class WholeMask(nn.Module):
         return maskss_ret
 
 class MaskRCNN(nn.Module):
-    def __init__(self,k,nms_threshold,img_h,img_w,cf_h,cf_w,mh,mw,device=None):
+    def __init__(self,k,nms_threshold,img_h,img_w,cf_h,cf_w,mh,mw,device=None,visualize=False):
         super(MaskRCNN, self).__init__()
         self.fpn=FeaturePyramidNet()
         self.rpn=RPNHead()
@@ -518,6 +524,7 @@ class MaskRCNN(nn.Module):
         self.cf_w=cf_w # width of cropped feature for roi align output
         self.mh=mh # resolution of output of mask generator
         self.mw=mw
+        self.visualize=visualize
 
     def forward(self,x):
         '''
@@ -538,7 +545,19 @@ class MaskRCNN(nn.Module):
         if filtered_bboxess is None:
             return scoress,bboxess,anchorss,None,None,None,None 
         cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
+        if self.visualize:
+            print("not cropped features p2!")
+            print(ps[0][0])
+            print("not cropped features p6!")
+            print(ps[4][0])
+            print("cropped features!")
+            print(cropped_featuress[0][:prop_counts[0]])
         maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+        if self.visualize:
+            print("mask generator mg weight!")
+            print(self.mask_generator.mg.weight)
+            print("small masks!")
+            print(maskss_small[0][:prop_counts[0]])
         maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
         return scoress,bboxess,anchorss,filtered_bboxess,maskss,prop_counts,prop_idxs
 
@@ -625,7 +644,7 @@ def sample_proposals(labels,S,counts=None):
     if counts is None:
         counts=labels.new(labels.shape[0],1).long().fill_(labels.shape[1])
     idxs=list()
-    sample_counts=list()
+    pos_counts=list()
     label_batch=torch.split(labels,1)
     count_batch=torch.split(counts,1)
     for label,count in zip(label_batch,count_batch):
@@ -637,15 +656,15 @@ def sample_proposals(labels,S,counts=None):
         idx_neg=(label==0).nonzero()
         pos_num=idx_pos.shape[0]
         neg_num=idx_neg.shape[0]
-        pos_count=idx_valid.new(1).long()
+        pos_count=idx_pos.new(1).long()
         p=min(pos_num,S/4)
-        n=S-p
+        n=min(neg_num,S-p)
         pos_count[0]=p
         idx=labels.new(S).zero_().long()
         idxx_pos_=random.sample(range(pos_num),p) #index of index
         idxx_neg_=random.sample(range(neg_num),n) #index of index
-        idxx_pos=sample_count.new(p).long()
-        idxx_neg=sample_count.new(n).long()
+        idxx_pos=pos_count.new(p).long()
+        idxx_neg=pos_count.new(n).long()
         for i in range(p):
             idxx_pos[i]=idxx_pos_[i] 
         for i in range(n):
@@ -655,7 +674,7 @@ def sample_proposals(labels,S,counts=None):
         idx_pos_selected=idx_pos_selected.clone().view(-1)
         idx_neg_selected=idx_neg_selected.clone().view(-1)
         idx[:pos_count]=idx_pos_selected
-        idx[pos_count:]=idx_neg_selected
+        idx[pos_count:pos_count+n]=idx_neg_selected
         idx=idx.unsqueeze(0)
         pos_count=pos_count.unsqueeze(0)
         idxs.append(idx)
@@ -769,12 +788,6 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
             gti=y1.new(4).zero_().float()
             ti[0]=(y-ay)/ah
             ti[1]=(x-ax)/aw
-            if h<=0 or w<=0:
-                print("neg h or w!")
-            if ah<=0 or aw<=0:
-                print("neg ah or aw!")
-            if gh<=0 or gw<=0:
-                print("neg gh or gw!")
             ti[2]=h.log()-ah.log()
             ti[3]=w.log()-aw.log()
             gti[0]=(gy-ay)/ah
@@ -880,8 +893,6 @@ def mask_visualizer(bbox,mask,gt_bbox,gt_mask):
     gt_bbox=gt_bbox.round().long()
     mask=torch.where(mask>0.5,torch.Tensor([1]),torch.Tensor([0]))
     gt_mask=torch.where(gt_mask>0.5,torch.Tensor([1]),torch.Tensor([0]))
-    print(mask.shape)
-    print(gt_mask.shape)
     mask=mask.long()
     gt_mask=gt_mask.long()
     mask=mask*100
@@ -893,6 +904,7 @@ def mask_visualizer(bbox,mask,gt_bbox,gt_mask):
     img=np.dstack((mask,mask,mask))
     img+=np.dstack((gt_mask,gt_mask,gt_mask))
     img=img.clip(0,255)
+    img=img.astype(np.uint8)
     img=cv.bbox_img(img,bbox[0],bbox[1],bbox[2],bbox[3],(255,0,0))
     img=cv.bbox_img(img,gt_bbox[0],gt_bbox[1],gt_bbox[2],gt_bbox[3],(0,255,0))
     cv.display_img(img)
