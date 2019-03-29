@@ -19,8 +19,8 @@ import utils.tools as tl
 
 import masker_ops as mo
 
-img_size=256 #size of input img
-batch_size=1
+img_size=512 #size of input img
+batch_size=2
 epoch=5
 lr=0.02
 sgd_momentum=0.9
@@ -28,14 +28,14 @@ weight_decay=0.0001
 
 MAX_ANN_PER_IMG=30
 
-k=200 #maximum number of masks from one img
+k=1000 #maximum number of masks from one img
 nms_threshold=0.7
 pos_threshold=0.7
 sample_size=512
 fh=16 #input feature patch size to mask generator
 fw=16
-mh=128 #output mask size of mask generator
-mw=128
+mh=256 #output mask size of mask generator
+mw=256
 
 masker_ckpt_path='logs/masker.ckpt'
 

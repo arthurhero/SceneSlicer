@@ -85,9 +85,7 @@ class RPNHead(nn.Module):
         self.rpn_conv=nn.Conv2d(256,256,kernel_size=3,padding=1)
         self.bn1=nn.BatchNorm2d(256)
         self.rpn_cls_score=nn.Conv2d(256,(3*2),kernel_size=1) #3 anchors, 2 cls
-        self.bnc=nn.BatchNorm2d(3*2)
         self.rpn_bbox_pred=nn.Conv2d(256,(3*4),kernel_size=1) #3 anchors, 4 coord
-        self.bnb=nn.BatchNorm2d(3*4)
 
     def forward(self, p):
         '''
@@ -97,9 +95,7 @@ class RPNHead(nn.Module):
         p=self.bn1(p)
         p=F.relu(p)
         p_cls_score=self.rpn_cls_score(p) # B x (3*2) x h x w
-        #p_cls_score=self.bnc(p_cls_score)
         p_bbox_pred=self.rpn_bbox_pred(p) # B x (3*4) x h x w
-        #p_bbox_pred=self.bnb(p_bbox_pred)
         #bbox returns dy, dx, log(h), log(w) wrt anchor
         return p_cls_score,p_bbox_pred 
 
@@ -425,9 +421,8 @@ class MaskGenerator(nn.Module):
                 nn.Conv2d(32,16,kernel_size=3,stride=1, padding=1),
                 nn.BatchNorm2d(16),
                 nn.ReLU())
-        #self.upsample=nn.ConvTranspose2d(32,32,kernel_size=2,stride=2)
+        self.upsample=nn.ConvTranspose2d(16,16,kernel_size=2,stride=2)
         self.mg=nn.Conv2d(16,1,kernel_size=1,stride=1)
-        self.bn=nn.BatchNorm2d(1)
 
     def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
         features_batch=torch.split(featuress,1)
@@ -445,9 +440,8 @@ class MaskGenerator(nn.Module):
             features=self.conv3(features)
             features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv4(features)
-            #features=self.upsample(features)
+            features=self.upsample(features)
             features=self.mg(features)
-            #features=self.bn(features)
             features=torch.sigmoid(features)
             masks_valid=F.interpolate(features,size=(mh,mw),mode='bilinear') # k x 1 x mh x mw
             masks[:count]=masks_valid
@@ -545,19 +539,14 @@ class MaskRCNN(nn.Module):
         if filtered_bboxess is None:
             return scoress,bboxess,anchorss,None,None,None,None 
         cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-        if self.visualize:
-            print("not cropped features p2!")
-            print(ps[0][0])
-            print("not cropped features p6!")
-            print(ps[4][0])
-            print("cropped features!")
-            print(cropped_featuress[0][:prop_counts[0]])
         maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+        '''
         if self.visualize:
             print("mask generator mg weight!")
             print(self.mask_generator.mg.weight)
             print("small masks!")
             print(maskss_small[0][:prop_counts[0]])
+            '''
         maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
         return scoress,bboxess,anchorss,filtered_bboxess,maskss,prop_counts,prop_idxs
 
