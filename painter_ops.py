@@ -13,24 +13,6 @@ from torch.nn import Parameter
 import utils.opencv_utils as cv
 import utils.tools as tl
 
-def l2normalize(w, eps=1e-12):
-    # normalize w where w is a pytorch tensor
-    return w / (w.norm() + eps)
-
-def init_weights(m):
-    # Initialize parameters
-    if type(m)==nn.Linear or type(m)==nn.Conv2d:
-        nn.init.xavier_uniform_(m.weight)
-        m.bias.data.fill_(0.01)
-
-def freeze_params(m):
-    for param in m.parameters():
-        param.requires_grad = False
-
-def unfreeze_params(m):
-    for param in m.parameters():
-        param.requires_grad = True 
-
 class SpectralNorm(nn.Module):
     '''
     Original Idea see paper by Miyato et. al.
@@ -45,7 +27,7 @@ class SpectralNorm(nn.Module):
         self.module = module
         self.name = name
         self.power_iterations = power_iterations
-        self.module.apply(init_weights)
+        self.module.apply(tl.init_weights)
         # if haven't made u,v before, initialize them
         if not self._made_params():
             self._make_params()
@@ -58,9 +40,9 @@ class SpectralNorm(nn.Module):
         height = w.data.shape[0]
         for _ in range(self.power_iterations):
             #calculate w^Tu
-            v.data = l2normalize(torch.mv(torch.t(w.view(height,-1).data), u.data))
+            v.data = tl.l2normalize(torch.mv(torch.t(w.view(height,-1).data), u.data))
             #calculate wv
-            u.data = l2normalize(torch.mv(w.view(height,-1).data, v.data))
+            u.data = tl.l2normalize(torch.mv(w.view(height,-1).data, v.data))
         #calculate u^Twv
         sigma = u.dot(w.view(height,-1).mv(v))
         #set normalized weight for module
@@ -86,8 +68,8 @@ class SpectralNorm(nn.Module):
         #initialize random vectors from isotropic distribution
         u = Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
         v = Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
-        u.data = l2normalize(u.data)
-        v.data = l2normalize(v.data)
+        u.data = tl.l2normalize(u.data)
+        v.data = tl.l2normalize(v.data)
         w_bar = Parameter(w.data)
 
         #delete the original weight
@@ -284,8 +266,8 @@ class GatedConv2d(nn.Module):
                 nn.Conv2d(in_channels,out_channels,kernel_size,stride,0,dilation,groups,bias),
                 nn.Sigmoid()
                 )
-        self.conv_layer.apply(init_weights)
-        self.gate_layer.apply(init_weights)
+        self.conv_layer.apply(tl.init_weights)
+        self.gate_layer.apply(tl.init_weights)
 
     def forward(self, x):
         pad=self.padding
@@ -362,7 +344,7 @@ class PainterNet(nn.Module):
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True)
         else:
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True,device=device).to(device)
-        freeze_params(self.ca)
+        tl.freeze_params(self.ca)
         self.pmconv7=GatedConv2d(128,128,3,stride=1,padding=pad)
         self.pmconv8=GatedConv2d(128,128,3,stride=1,padding=pad)
 
@@ -381,25 +363,25 @@ class PainterNet(nn.Module):
         mask - B x 1 x h x w
         '''
         #freeze some layers
-        freeze_params(self.ca)
+        tl.freeze_params(self.ca)
         if self.fix_coarse:
-            self.conv1.apply(freeze_params)
-            self.conv2.apply(freeze_params)
-            self.conv3.apply(freeze_params)
-            self.conv4.apply(freeze_params)
-            self.conv5.apply(freeze_params)
-            self.conv6.apply(freeze_params)
-            self.conv7.apply(freeze_params)
-            self.conv8.apply(freeze_params)
-            self.conv9.apply(freeze_params)
-            self.conv10.apply(freeze_params)
-            self.conv11.apply(freeze_params)
-            self.conv12.apply(freeze_params)
-            self.conv13.apply(freeze_params)
-            self.conv14.apply(freeze_params)
-            self.conv15.apply(freeze_params)
-            self.conv16.apply(freeze_params)
-            self.conv17.apply(freeze_params)
+            self.conv1.apply(tl.freeze_params)
+            self.conv2.apply(tl.freeze_params)
+            self.conv3.apply(tl.freeze_params)
+            self.conv4.apply(tl.freeze_params)
+            self.conv5.apply(tl.freeze_params)
+            self.conv6.apply(tl.freeze_params)
+            self.conv7.apply(tl.freeze_params)
+            self.conv8.apply(tl.freeze_params)
+            self.conv9.apply(tl.freeze_params)
+            self.conv10.apply(tl.freeze_params)
+            self.conv11.apply(tl.freeze_params)
+            self.conv12.apply(tl.freeze_params)
+            self.conv13.apply(tl.freeze_params)
+            self.conv14.apply(tl.freeze_params)
+            self.conv15.apply(tl.freeze_params)
+            self.conv16.apply(tl.freeze_params)
+            self.conv17.apply(tl.freeze_params)
 
         xin = x
         ones_boundary = torch.ones_like(mask)

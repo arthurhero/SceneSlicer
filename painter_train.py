@@ -35,11 +35,11 @@ gan_iteration=5
 batch_size=16
 img_size=128
 epoch=100
-lr=1e-4
+lr=1e-6
 l1_alpha=1
 l1_coarse_alpha=0
 fm_alpha=0
-patch_alpha=0.03
+patch_alpha=0.05
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -118,11 +118,11 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
             if pretrain or step%(gan_iteration+1)==gan_iteration:
                 #if False:
                 train_g=True
-                disnet.apply(po.freeze_params)
-                gennet.apply(po.unfreeze_params)
+                disnet.apply(tl.freeze_params)
+                gennet.apply(tl.unfreeze_params)
             else:
-                disnet.apply(po.unfreeze_params)
-                gennet.apply(po.freeze_params)
+                disnet.apply(tl.unfreeze_params)
+                gennet.apply(tl.freeze_params)
             actual_batch_size=img_batch.shape[0]
             img_batch=img_batch.to(device)
             imgs=img_batch[:,:in_channels]
@@ -156,8 +156,8 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
                 d_loss.backward()
                 dis_optimizer.step()
                 if step%(gan_iteration+1)==0:
-                    print('Epoch [{}/{}] , Step {}, D_Loss: {:.4f}'
-                            .format(e+1, epoch, step, d_loss.item()))
+                    print('Epoch [{}/{}] , Step {}, D_Loss: {:.4f}, Pos_avg_score: {:.4f}, Neg_avg_score: {:.4f}'
+                            .format(e+1, epoch, step, d_loss.item(), pos_score.mean().item(), neg_score.mean().item()))
             else:
                 l1_loss=(predictions-imgs).abs().mean()
                 feature_match_loss=(pos_feature-neg_feature).abs().mean()
@@ -177,8 +177,8 @@ def train_painter(pretrain=False,fix_coarse=False,ob=False):
                 else:
                     torch.save(gennet.state_dict(), gen_ckpt_path)
                 torch.save(disnet.state_dict(), dis_ckpt_path)
-                print('Epoch [{}/{}] , Step {}, G_Loss: {:.4f}'
-                        .format(e+1, epoch, step, loss.item()))
+                print('Epoch [{}/{}] , Step {}, G_Loss: {:.4f}, l1_loss: {:.4f}, g_loss: {:.4f}'
+                        .format(e+1, epoch, step, loss.item(), l1_loss.item(), g_loss.item()))
 
                 '''
                 sample_orig=tl.recover_img(imgs[0])
