@@ -28,14 +28,18 @@ weight_decay=0.0001
 
 MAX_ANN_PER_IMG=30
 
-k=1000 #maximum number of masks from one img
+k=128 #maximum number of masks from one img
 nms_threshold=0.7
 pos_threshold=0.7
 sample_size=512
-fh=16 #input feature patch size to mask generator
-fw=16
-mh=256 #output mask size of mask generator
-mw=256
+fh=14 #input feature patch size to mask generator
+fw=14
+mh=28 #output mask size of mask generator
+mw=28
+
+l_cls_alpha=0.005
+l_bbox_alpha=1
+l_mask_alpha=0.005
 
 masker_ckpt_path='logs/masker.ckpt'
 
@@ -214,12 +218,12 @@ def train_masker():
             scoress,bboxess,anchorss,bboxess_f,maskss_f,prop_counts,prop_idxs=mask_rcnn(imgs)
             labels=label_assigner(bboxess,gt_bboxess,gt_counts)
             if labels is None:
-                #print("got 0 pos bbox!")
+                print("got 0 pos bbox!")
                 continue
             sample_idxs,sample_counts=mo.sample_proposals(labels,sample_size)
             l_cls=mo.calc_cls_score_loss(scoress,sample_idxs,sample_counts)
             l_bbox=mo.calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,sample_idxs,sample_counts)
-            loss=l_cls+l_bbox
+            loss=l_cls_alpha*l_cls+l_bbox_alpha*l_bbox
 
             l_mask=l_bbox.new(1).zero_()
             if bboxess_f is not None:
@@ -228,11 +232,11 @@ def train_masker():
                 if labels_f is not None:
                     sample_idxs_f,sample_counts_f=mo.sample_proposals(labels_f,sample_size,prop_counts) #sample pos from fil
                     l_mask=mo.calc_mask_loss(bboxess_f,maskss_f,prop_counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs_f,sample_counts_f,visualize=visualize)
-                    loss=loss+l_mask
+                    loss=loss+l_mask_alpha*l_mask
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if step%10==0:
+            if step%1==0:
                 torch.save(mask_rcnn.state_dict(), masker_ckpt_path)
                 print('Epoch [{}/{}] , Step {}, Loss: {:.4f}, l_cls: {:.4f}, l_bbox: {:.4f}, l_mask: {:.4f}'
                             .format(e+1,epoch,step,loss.item(),l_cls.item(),l_bbox.item(),l_mask.item()))

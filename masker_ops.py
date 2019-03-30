@@ -72,7 +72,7 @@ class FeaturePyramidNet(nn.Module):
         p3=self.smooth3(m3)
         p2=self.smooth2(m2)
         p6=self.getp6(p5)
-
+        
         return p6,p5,p4,p3,p2 #size: 1/64,1/32,1/16,1/8,1/4
 
 class RPNHead(nn.Module):
@@ -85,7 +85,9 @@ class RPNHead(nn.Module):
         self.rpn_conv=nn.Conv2d(256,256,kernel_size=3,padding=1)
         self.bn1=nn.BatchNorm2d(256)
         self.rpn_cls_score=nn.Conv2d(256,(3*2),kernel_size=1) #3 anchors, 2 cls
+        self.bnc=nn.BatchNorm2d(3*2)
         self.rpn_bbox_pred=nn.Conv2d(256,(3*4),kernel_size=1) #3 anchors, 4 coord
+        self.bnb=nn.BatchNorm2d(3*4)
 
     def forward(self, p):
         '''
@@ -95,7 +97,9 @@ class RPNHead(nn.Module):
         p=self.bn1(p)
         p=F.relu(p)
         p_cls_score=self.rpn_cls_score(p) # B x (3*2) x h x w
+        p_cls_score=self.bnc(p_cls_score) # B x (3*2) x h x w
         p_bbox_pred=self.rpn_bbox_pred(p) # B x (3*4) x h x w
+        p_bbox_pred=self.bnb(p_bbox_pred) # B x (3*4) x h x w
         #bbox returns dy, dx, log(h), log(w) wrt anchor
         return p_cls_score,p_bbox_pred 
 
@@ -434,11 +438,11 @@ class MaskGenerator(nn.Module):
             count=count[0]
             features=features[:count] # k x 256 x fh x fw
             features=self.conv1(features)
-            features=F.interpolate(features, scale_factor=2, mode='bilinear')
+            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv2(features)
-            features=F.interpolate(features, scale_factor=2, mode='bilinear')
+            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv3(features)
-            features=F.interpolate(features, scale_factor=2, mode='bilinear')
+            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
             features=self.conv4(features)
             features=self.upsample(features)
             features=self.mg(features)
@@ -534,6 +538,10 @@ class MaskRCNN(nn.Module):
         css=(p2cs,p3cs,p4cs,p5cs,p6cs)
         bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
         scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
+        '''
+        print(bboxess)
+        print(scoress)
+        '''
         #N down to K
         filtered_bboxess,prop_counts,prop_idxs=self.proposal_filter(scoress,bboxess)
         if filtered_bboxess is None:
@@ -541,12 +549,11 @@ class MaskRCNN(nn.Module):
         cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
         maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
         '''
-        if self.visualize:
-            print("mask generator mg weight!")
-            print(self.mask_generator.mg.weight)
-            print("small masks!")
-            print(maskss_small[0][:prop_counts[0]])
-            '''
+        print("mask generator mg weight!")
+        print(self.mask_generator.mg.weight)
+        print("small masks!")
+        print(maskss_small[0][:prop_counts[0]])
+        '''
         maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
         return scoress,bboxess,anchorss,filtered_bboxess,maskss,prop_counts,prop_idxs
 
