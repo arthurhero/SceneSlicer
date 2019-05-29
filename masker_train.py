@@ -29,8 +29,8 @@ weight_decay=0.0001
 MAX_ANN_PER_IMG=30
 
 k=128 #maximum number of masks from one img
-nms_threshold=0.7
-pos_threshold=0.7
+nms_threshold=0.5
+pos_threshold=0.5
 sample_size=512
 fh=14 #input feature patch size to mask generator
 fw=14
@@ -41,6 +41,8 @@ l_cls_alpha=0.005
 l_bbox_alpha=1
 l_mask_alpha=0.005
 
+fpn_ckpt_path='logs/masker.ckpt'
+rpn_ckpt_path='logs/masker.ckpt'
 masker_ckpt_path='logs/masker.ckpt'
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -186,7 +188,7 @@ def test_coco_dataset():
 '''
 Train the masker
 '''
-def train_masker():
+def train_masker(step=1): # 4 step training
     in_channels=3
     #load dataset
     dataset=COCODataSet()
@@ -195,13 +197,29 @@ def train_masker():
     #modules
     mask_rcnn=mo.MaskRCNN(k,nms_threshold,img_size,img_size,fh,fw,mh,mw,device,visualize).to(device)
     mask_rcnn.train()
+    if step==1 or step==2:
+        mask_rcnn.fpn.apply(tl.unfreeze_params)
+    else:
+        if os.path.isfile(fpn_ckpt_path):
+            mask_rcnn.fpn.load_state_dict(torch.load(fpn_ckpt_path))
+            print("Loaded fpn ckpt!")
+        mask_rcnn.fpn.apply(tl.freeze_params)
+
+    if os.path.isfile(rpn_ckpt_path):
+        mask_rcnn.rpn.load_state_dict(torch.load(rpn_ckpt_path))
+        print("Loaded rpn ckpt!")
+    if os.path.isfile(masker_ckpt_path):
+        mask_rcnn.mask_generator.load_state_dict(torch.load(masker_ckpt_path))
+        print("Loaded masker ckpt!")
+    if step==1 or step==3:
+        mask_rcnn.rpn.apply(tl.unfreeze_params)
+        mask_rcnn.mask_generator.apply(tl.freeze_params)
+    else:
+        mask_rcnn.rpn.apply(tl.freeze_params)
+        mask_rcnn.mask_generator.apply(tl.unfreeze_params)
+
     label_assigner=mo.AssignClsLabel(pos_threshold).to(device)
     optimizer = torch.optim.SGD(mask_rcnn.parameters(),lr=lr,momentum=sgd_momentum,weight_decay=weight_decay)
-
-    #load ckpt
-    if os.path.isfile(masker_ckpt_path):
-        mask_rcnn.load_state_dict(torch.load(masker_ckpt_path))
-        print("Loaded masker ckpt!")
 
     for e in range(epoch):
         step=0
@@ -215,32 +233,31 @@ def train_masker():
             gt_maskss=gt_maskss.to(device)
             gt_counts=gt_counts.to(device)
 
-            scoress,bboxess,anchorss,bboxess_f,maskss_f,prop_counts,prop_idxs=mask_rcnn(imgs)
-            labels=label_assigner(bboxess,gt_bboxess,gt_counts)
-            if labels is None:
-                print("got 0 pos bbox!")
-                continue
-            sample_idxs,sample_counts=mo.sample_proposals(labels,sample_size)
-            l_cls=mo.calc_cls_score_loss(scoress,sample_idxs,sample_counts)
-            l_bbox=mo.calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,sample_idxs,sample_counts)
-            loss=l_cls_alpha*l_cls+l_bbox_alpha*l_bbox
-
-            l_mask=l_bbox.new(1).zero_()
-            if bboxess_f is not None:
-                #print("got "+str(prop_counts[0].item())+" proposal!")
-                labels_f=label_assigner(bboxess_f,gt_bboxess,gt_counts,prop_counts) #get labels for filtered proposals
+            if step==1 or step==3:
+                scoress,bboxess,anchorss=mask_rcnn(imgs,True)
+                labels=label_assigner(anchorss,gt_bboxess,gt_counts)
+                sample_idxs,sample_counts=mo.sample_proposals(labels,sample_size)
+                l_cls=mo.calc_cls_score_loss(scoress,sample_idxs,sample_counts)
+                l_bbox=mo.calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,sample_idxs,sample_counts)
+                loss=l_cls_alpha*l_cls+l_bbox_alpha*l_bbox
+            else:
+                bboxess_f,maskss_f,prop_counts=mask_rcnn(imgs,False)
+                labels_f=label_assigner(bboxess_f,gt_bboxess,gt_counts,prop_counts,use_anchor=False) #get labels for filtered proposals
                 if labels_f is not None:
-                    sample_idxs_f,sample_counts_f=mo.sample_proposals(labels_f,sample_size,prop_counts) #sample pos from fil
+                    sample_idxs_f,sample_counts_f=mo.sample_proposals(labels_f,k,sample_proposal=True) #sample pos from filtered proposals
                     l_mask=mo.calc_mask_loss(bboxess_f,maskss_f,prop_counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs_f,sample_counts_f,visualize=visualize)
-                    loss=loss+l_mask_alpha*l_mask
+                    loss=l_mask
+                else:
+                    print("None of the proposed region is positive in step",step)
+                    return
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if step%1==0:
+            if step%10==0:
                 torch.save(mask_rcnn.state_dict(), masker_ckpt_path)
                 print('Epoch [{}/{}] , Step {}, Loss: {:.4f}, l_cls: {:.4f}, l_bbox: {:.4f}, l_mask: {:.4f}'
                             .format(e+1,epoch,step,loss.item(),l_cls.item(),l_bbox.item(),l_mask.item()))
             step+=1
 
 #test_coco_dataset()
-train_masker()
+train_masker(1)

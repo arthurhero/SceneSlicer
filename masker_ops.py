@@ -524,7 +524,7 @@ class MaskRCNN(nn.Module):
         self.mw=mw
         self.visualize=visualize
 
-    def forward(self,x):
+    def forward(self,x,train_RPN=True):
         '''
         x - a batch of imgs, B x 3 x ih x iw
         '''
@@ -542,58 +542,78 @@ class MaskRCNN(nn.Module):
         print(bboxess)
         print(scoress)
         '''
-        #N down to K
-        filtered_bboxess,prop_counts,prop_idxs=self.proposal_filter(scoress,bboxess)
-        if filtered_bboxess is None:
-            return scoress,bboxess,anchorss,None,None,None,None 
-        cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-        maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
-        '''
-        print("mask generator mg weight!")
-        print(self.mask_generator.mg.weight)
-        print("small masks!")
-        print(maskss_small[0][:prop_counts[0]])
-        '''
-        maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
-        return scoress,bboxess,anchorss,filtered_bboxess,maskss,prop_counts,prop_idxs
+        if not train_RPN:
+            #N down to K
+            filtered_bboxess,prop_counts,prop_idxs=self.proposal_filter(scoress,bboxess)
+            '''
+            if filtered_bboxess is None:
+                return scoress,bboxess,anchorss,None,None,None,None 
+            '''
+            cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
+            maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+            '''
+            print("mask generator mg weight!")
+            print(self.mask_generator.mg.weight)
+            print("small masks!")
+            print(maskss_small[0][:prop_counts[0]])
+            '''
+            maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
+            return filtered_bboxess,maskss,prop_counts
+        else:
+            return scoress,bboxess,anchorss
 
 class AssignClsLabel(nn.Module):
-    def __init__(self,pos_threshold=0.7):
+    def __init__(self,pos_threshold=0.5):
         super(AssignClsLabel, self).__init__()
         '''
-        Given bboxess B x N x 4,
-        and valid count B x 1 (if none, all valid)
+        Given anchorss B x N x 4, (y_cener,x_center,h,w)
         and gt bboxess B x A x 4 (ground truth),
         and gt count B x 1 (indicate how many a of A are valid gt)
-        Assign each bbox a cls label of either pos or other (1 or 0)
+        Assign each anchor a cls label of either pos or other (1 or 0)
         
         return labels B x N x 1
         '''
         self.pos_threshold=pos_threshold
 
-    def forward(self,bboxess,gt_bboxess,gt_counts,counts=None):
+    def forward(self,anchorss,gt_bboxess,gt_counts,counts=None,use_anchor=True):
         labels=list()
-        if counts is None:
-            counts=bboxess.new(bboxess.shape[0],1).long().fill_(bboxess.shape[1])
-        bboxes_batch=torch.split(bboxess,1)
+        anchors_batch=torch.split(anchorss,1)
         gt_bboxes_batch=torch.split(gt_bboxess,1)
         gt_count_batch=torch.split(gt_counts,1)
-        count_batch=torch.split(counts,1)
-        for bboxes,gt_bboxes,gt_count,count in zip(bboxes_batch,gt_bboxes_batch,gt_count_batch,count_batch):
-            bboxes=bboxes[0]
+        counts_batch=gt_count_batch
+        if not use_anchor:
+            counts_batch=torch.split(counts,1)
+        for anchors,gt_bboxes,gt_count,count in zip(anchors_batch,gt_bboxes_batch,gt_count_batch,count_batch):
+            anchors=anchors[0]
             count=count[0]
-            bboxes=bboxes[:count] # k x 4
-
+            if not use_anchor:
+                anchors=anchors[:count]
             gt_bboxes=gt_bboxes[0]
             gt_count=gt_count[0]
             gt_bboxes=gt_bboxes[:gt_count] # a x 4
             
-            label=bboxes.new(bboxes.shape[0],1).zero_()
-            y1=bboxes[:,0]
-            x1=bboxes[:,1]
-            y2=bboxes[:,2]
-            x2=bboxes[:,3]
-            area=(y2-y1)*(x2-x1)
+            label=anchors.new(anchors.shape[0],1).zero_() # N x 1
+            if use_anchor:
+                y=anchors[:,0]
+                x=anchors[:,1]
+                h=anchors[:,2]
+                w=anchors[:,3]
+                y1=y-h/2
+                y2=y1+h
+                x1=x-w/2
+                x2=x1+w
+                area=h*w
+            else:
+                bboxes=anchors
+                y1=bboxes[0]
+                x1=bboxes[1]
+                y2=bboxes[2]
+                x2=bboxes[3]
+                y=(y1+y2)/2.
+                x=(x1+x2)/2.
+                h=y2-y1
+                w=x2-x1
+                area=h*w
             gt_bbox_batch=torch.split(gt_bboxes,1)
             for gt_bbox in gt_bbox_batch:
                 gt_bbox=gt_bbox[0]
@@ -613,15 +633,18 @@ class AssignClsLabel(nn.Module):
                 cls_score=cls_score.clone().view(-1,1)
                 label=label.clone()+cls_score
             label=label.clone().ge(1.).long()
-            pos_idx=label.view(-1).nonzero()
-            pos_count=pos_idx.shape[0]
-            # if no positive bbox, skip the current batch
-            if pos_count == 0:
-                return None
-            label_pad=bboxes.new(bboxess.shape[1],1).zero_().long()
-            label_pad[:count]=label
-            label_pad=label_pad.unsqueeze(0)
-            labels.append(label_pad)
+            if not use_anchor:
+                pos_idx=label.view(-1).nonzero()
+                pos_count=pos_idx.shape[0]
+                if pos_count == 0:
+                    return None
+                label_pad=label.new(anchorss.shape[1],1).zero_().long()
+                label_pad[:count]=label
+                label_pad=label_pad.unsqueeze(0)
+                labels.append(label_pad)
+            else:
+                label=label.unsqueeze(0)
+                labels.append(label)
         labels=torch.cat(labels) # B x N x 1, long tensor
         return labels
 
@@ -629,48 +652,43 @@ class AssignClsLabel(nn.Module):
 methods for calculating losses
 '''
             
-def sample_proposals(labels,S,counts=None):
+def sample_proposals(labels,S,sample_proposal=False):
     '''
     Given class labels, B x N x 1
-    and valid counts, B x 1 (if none, then all valid)
-    Sample S/4 positive proposals, 3*S/4 neg proposals
-    and return the idxs B x S where first p idx is pos and the rest is neg
+    Sample S/4 positive anchors, 3*S/4 neg anchors 
+    and return the idxs B x S where first quarter (or less) idx is pos and the rest is neg
     and pos counts B x 1
     '''
-    if counts is None:
-        counts=labels.new(labels.shape[0],1).long().fill_(labels.shape[1])
     idxs=list()
     pos_counts=list()
     label_batch=torch.split(labels,1)
-    count_batch=torch.split(counts,1)
-    for label,count in zip(label_batch,count_batch):
+    for label in label_batch:
         label=label[0]
-        count=count[0]
-        label=label[:count].clone()
         label=label.clone().view(-1)
         idx_pos=label.nonzero()
         idx_neg=(label==0).nonzero()
         pos_num=idx_pos.shape[0]
         neg_num=idx_neg.shape[0]
         pos_count=idx_pos.new(1).long()
-        p=min(pos_num,S/4)
-        n=min(neg_num,S-p)
+        if sample_proposal:
+            p=min(pos_num,S)
+            n=0
+        else:
+            p=min(pos_num,S/4)
+            n=min(neg_num,S-p)
         pos_count[0]=p
         idx=labels.new(S).zero_().long()
-        idxx_pos_=random.sample(range(pos_num),p) #index of index
-        idxx_neg_=random.sample(range(neg_num),n) #index of index
-        idxx_pos=pos_count.new(p).long()
-        idxx_neg=pos_count.new(n).long()
-        for i in range(p):
-            idxx_pos[i]=idxx_pos_[i] 
-        for i in range(n):
-            idxx_neg[i]=idxx_neg_[i] 
+        idxx_pos=torch.randperm(idx_pos.shape[0])
+        idxx_pos=idxx_pos[:p].clone()
         idx_pos_selected=torch.index_select(idx_pos,0,idxx_pos)
-        idx_neg_selected=torch.index_select(idx_neg,0,idxx_neg)
         idx_pos_selected=idx_pos_selected.clone().view(-1)
-        idx_neg_selected=idx_neg_selected.clone().view(-1)
         idx[:pos_count]=idx_pos_selected
-        idx[pos_count:pos_count+n]=idx_neg_selected
+        if not sample_proposal:
+            idxx_neg=torch.randperm(idx_neg.shape[0])
+            idxx_neg=idxx_pos[:n].clone()
+            idx_neg_selected=torch.index_select(idx_neg,0,idxx_neg)
+            idx_neg_selected=idx_neg_selected.clone().view(-1)
+            idx[pos_count:pos_count+n]=idx_neg_selected
         idx=idx.unsqueeze(0)
         pos_count=pos_count.unsqueeze(0)
         idxs.append(idx)
@@ -709,9 +727,9 @@ def calc_cls_score_loss(scoress,idxs,counts):
 
 def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
     '''
-    Given bboxess B x N x 4
-          anchorss B x N x 4
-          gt_boxess B x N x 4
+    Given bboxess B x N x 4, (y1,x1,y2,x2)
+          anchorss B x N x 4, (y_cener,x_center,h,w)
+          gt_boxess B x N x 4, (y1,x1,y2,x2)
           gt_counts B x 1
           sample idxs B x S
           sample counts B x 1
@@ -732,7 +750,7 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
         gt_count=gt_count[0]
         idx=idx[0]
         count=count[0]
-        idx=idx[:count].clone()
+        idx=idx[:count].clone() # get idx of positive anchors
         bboxes=torch.index_select(bboxes.clone(),0,idx)
         anchors=torch.index_select(anchors.clone(),0,idx)
         gt_bboxes=gt_bboxes[:gt_count].clone() # a x 4
@@ -746,22 +764,22 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
         tis=list()
         gtis=list()
         for bbox,anchor in zip(bbox_batch,anchor_batch):
-            #find the gt bbox that has the largest iou with the current bbox
+            #find the gt bbox that has the largest iou with the current anchor 
             bbox=bbox[0]
             anchor=anchor[0]
-            y1=bbox[0]
-            x1=bbox[1]
-            y2=bbox[2]
-            x2=bbox[3]
-            y=(y1+y2)/2.
-            x=(x1+x2)/2.
-            h=y2-y1
-            w=x2-x1
-            area=(y2-y1)*(x2-x1)
-            gt_yy1=gt_y1.clamp(min=y1.item(),max=y2.item())
-            gt_xx1=gt_x1.clamp(min=x1.item(),max=x2.item())
-            gt_yy2=gt_y2.clamp(min=y1.item(),max=y2.item())
-            gt_xx2=gt_x2.clamp(min=x1.item(),max=x2.item())
+            ay=anchor[0]
+            ax=anchor[1]
+            ah=anchor[2]
+            aw=anchor[3]
+            ay1=ay-ah/2
+            ay2=ay1+ah
+            ax1=ax-aw/2
+            ax2=ax1+aw
+            area=ah*aw
+            gt_yy1=gt_y1.clamp(min=ay1.item(),max=ay2.item())
+            gt_xx1=gt_x1.clamp(min=ax1.item(),max=ax2.item())
+            gt_yy2=gt_y2.clamp(min=ay1.item(),max=ay2.item())
+            gt_xx2=gt_x2.clamp(min=ax1.item(),max=ax2.item())
             inter=(gt_yy2-gt_yy1)*(gt_xx2-gt_xx1)
             union=(gt_area+area)-inter
             iou=inter/union
@@ -776,10 +794,14 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
             gx=(gx1+gx2)/2.
             gh=gy2-gy1
             gw=gx2-gx1
-            ay=anchor[0]
-            ax=anchor[1]
-            ah=anchor[2]
-            aw=anchor[3]
+            y1=bbox[0]
+            x1=bbox[1]
+            y2=bbox[2]
+            x2=bbox[3]
+            y=(y1+y2)/2.
+            x=(x1+x2)/2.
+            h=y2-y1
+            w=x2-x1
             ti=y1.new(4).zero_().float()
             gti=y1.new(4).zero_().float()
             ti[0]=(y-ay)/ah
