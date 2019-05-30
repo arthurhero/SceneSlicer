@@ -222,7 +222,7 @@ class ROIAlign(nn.Module):
     def __init__(self):
         super(ROIAlign, self).__init__()
         '''
-        Given bboxess B x K x 4 proposed by ProposalFilter
+        Given bboxess B x K x 4 sampled pos bboxes or proposed by ProposalFilter (during testing)
         and counts B x 1 indicating k of K valid bboxess
         and feature levels p2 - p6
 
@@ -320,7 +320,7 @@ class MaskGenerator(nn.Module):
                 nn.BatchNorm2d(128),
                 nn.ReLU())
         self.conv4=nn.Sequential(
-                nn.Conv2d(128,1,kernel_size=1,stride=1, padding=1))
+                nn.Conv2d(128,1,kernel_size=1,stride=1, padding=0))
 
     def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
         features_batch=torch.split(featuress,1)
@@ -393,7 +393,7 @@ class WholeMask(nn.Module):
         return maskss_ret
 
 class MaskRCNN(nn.Module):
-    def __init__(self,r,pos_threshold,img_h,img_w,cf_h,cf_w,mh,mw,r,device=None,visualize=False):
+    def __init__(self,r,pos_threshold,img_h,img_w,cf_h,cf_w,mh,mw,r,device=None):
         super(MaskRCNN, self).__init__()
         self.fpn=FeaturePyramidNet()
         self.rpn=RPNHead()
@@ -411,7 +411,6 @@ class MaskRCNN(nn.Module):
         self.cf_w=cf_w # width of cropped feature for roi align output
         self.mh=mh # resolution of output of mask generator
         self.mw=mw
-        self.visualize=visualize
         self.label_assigner=AssignClsLabel(pos_threshold).to(device)
         self.r=r # number of pos proposals sampled
 
@@ -427,6 +426,7 @@ class MaskRCNN(nn.Module):
         p5cs,p5bp=self.rpn(p5)
         p6cs,p6bp=self.rpn(p6)
         ps=(p2,p3,p4,p5,p6)
+        self.ps=ps
         css=(p2cs,p3cs,p4cs,p5cs,p6cs)
         bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
         scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
@@ -441,13 +441,22 @@ class MaskRCNN(nn.Module):
                 sample_bboxess=select_bbox(bboxess,sample_idxs,sample_counts)
                 cropped_featuress=self.roi_align(sample_bboxess,sample_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
                 maskss_small=self.mask_generator(cropped_featuress,sample_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+                maskss=self.whole_mask(sample_bboxess,sample_counts,maskss_small,self.img_h,self.img_w)
+                return sample_bboxess,maskss,sample_counts
             else:
                 print("Zero positive proposal!")
                 return None,None,None
-            maskss=self.whole_mask(sample_bboxess,sample_counts,maskss_small,self.img_h,self.img_w)
-            return sample_bboxess,maskss,sample_counts
         else:
             return scoress,bboxess,anchorss
+
+    def predict_mask(self,bboxess,counts):
+        '''
+        Predict mask for filtered bboxess
+        '''
+        cropped_featuress=self.roi_align(bboxess,counts,self.ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
+        maskss_small=self.mask_generator(cropped_featuress,counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+        maskss=self.whole_mask(bboxess,counts,maskss_small,self.img_h,self.img_w)
+        return maskss
 
 def select_bbox(bboxess,sample_idxs,sample_counts):
     '''
@@ -485,7 +494,6 @@ class ProposalFilter(nn.Module):
 
         return ret_bboxess shape: B x K x 4
                counts      shape: B x 1
-               idx         shape: B x K
         '''
         self.k=k
         self.nms_threshold=nms_threshold
@@ -526,9 +534,6 @@ class ProposalFilter(nn.Module):
             while count<top_k and idx.shape[0]>0:
                 i = idx[-1]  #index of current largest val
                 idx=idx[:-1]  #remove kept element
-                #skip any bbox whose area is too small
-                if area[i]<4:
-                    continue
                 keep[count]=i
                 count += 1
                 #get the remaining bboxes
@@ -571,9 +576,6 @@ class ProposalFilter(nn.Module):
             keep=keep[0]
             count=count[0]
             bboxes=bboxes[0]
-            if count == 0:
-                #if zero proposal, skip current batch
-                return None, None, None
             keep=keep[:count] #get rid of zero-padding at the end
             rem_bboxes=torch.index_select(bboxes,0,keep) #select bboxes according to keep indices
             ret_bboxes=rem_bboxes.new(self.k,4).zero_()
@@ -581,7 +583,7 @@ class ProposalFilter(nn.Module):
             ret_bboxes=ret_bboxes.unsqueeze(0)
             ret_bboxess.append(ret_bboxes)
         ret_bboxess=torch.cat(ret_bboxess) #B x top_k x 4
-        return ret_bboxess,counts,keeps
+        return ret_bboxess,counts
 
 class AssignClsLabel(nn.Module):
     def __init__(self,pos_threshold=0.5):
@@ -596,19 +598,13 @@ class AssignClsLabel(nn.Module):
         '''
         self.pos_threshold=pos_threshold
 
-    def forward(self,anchorss,gt_bboxess,gt_counts,counts=None,use_anchor=True):
+    def forward(self,anchorss,gt_bboxess,gt_counts,use_anchor=True):
         labels=list()
         anchors_batch=torch.split(anchorss,1)
         gt_bboxes_batch=torch.split(gt_bboxess,1)
         gt_count_batch=torch.split(gt_counts,1)
-        counts_batch=gt_count_batch
-        if not use_anchor:
-            counts_batch=torch.split(counts,1)
-        for anchors,gt_bboxes,gt_count,count in zip(anchors_batch,gt_bboxes_batch,gt_count_batch,count_batch):
+        for anchors,gt_bboxes,gt_count in zip(anchors_batch,gt_bboxes_batch,gt_count_batch):
             anchors=anchors[0]
-            count=count[0]
-            if not use_anchor:
-                anchors=anchors[:count]
             gt_bboxes=gt_bboxes[0]
             gt_count=gt_count[0]
             gt_bboxes=gt_bboxes[:gt_count] # a x 4
@@ -626,10 +622,10 @@ class AssignClsLabel(nn.Module):
                 area=h*w
             else:
                 bboxes=anchors
-                y1=bboxes[0]
-                x1=bboxes[1]
-                y2=bboxes[2]
-                x2=bboxes[3]
+                y1=bboxes[:,0]
+                x1=bboxes[:,1]
+                y2=bboxes[:,2]
+                x2=bboxes[:,3]
                 y=(y1+y2)/2.
                 x=(x1+x2)/2.
                 h=y2-y1
@@ -659,25 +655,18 @@ class AssignClsLabel(nn.Module):
                 pos_count=pos_idx.shape[0]
                 if pos_count == 0:
                     return None
-                label_pad=label.new(anchorss.shape[1],1).zero_().long()
-                label_pad[:count]=label
-                label_pad=label_pad.unsqueeze(0)
-                labels.append(label_pad)
-            else:
-                label=label.unsqueeze(0)
-                labels.append(label)
+            label=label.unsqueeze(0)
+            labels.append(label)
         labels=torch.cat(labels) # B x N x 1, long tensor
         return labels
 
-'''
-methods for calculating losses
-'''
-            
 def sample_proposals(labels,S,sample_proposal=False):
     '''
     Given class labels, B x N x 1
     Sample S/4 positive anchors, 3*S/4 neg anchors 
-    and return the idxs B x S where first quarter (or less) idx is pos and the rest is neg
+    If sample_proposal, sample S positive proposals
+
+    return the idxs B x S where first quarter (or less) idx is pos and the rest is neg
     and pos counts B x 1
     '''
     idxs=list()
@@ -703,13 +692,13 @@ def sample_proposals(labels,S,sample_proposal=False):
         idxx_pos=idxx_pos[:p].clone()
         idx_pos_selected=torch.index_select(idx_pos,0,idxx_pos)
         idx_pos_selected=idx_pos_selected.clone().view(-1)
-        idx[:pos_count]=idx_pos_selected
+        idx[:p]=idx_pos_selected
         if not sample_proposal:
             idxx_neg=torch.randperm(idx_neg.shape[0])
             idxx_neg=idxx_pos[:n].clone()
             idx_neg_selected=torch.index_select(idx_neg,0,idxx_neg)
             idx_neg_selected=idx_neg_selected.clone().view(-1)
-            idx[pos_count:pos_count+n]=idx_neg_selected
+            idx[p:p+n]=idx_neg_selected
         idx=idx.unsqueeze(0)
         pos_count=pos_count.unsqueeze(0)
         idxs.append(idx)
@@ -718,6 +707,10 @@ def sample_proposals(labels,S,sample_proposal=False):
     pos_counts=torch.cat(pos_counts)
     return idxs,pos_counts
 
+'''
+methods for calculating losses
+'''
+            
 def calc_cls_score_loss(scoress,idxs,counts):
     '''
     Given scoress (not softmaxed) B x N x 2

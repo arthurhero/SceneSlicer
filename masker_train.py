@@ -20,17 +20,15 @@ import utils.tools as tl
 import masker_ops as mo
 
 img_size=512 #size of input img
-batch_size=2
 epoch=5
-lr=0.02
+lr=0.003
 sgd_momentum=0.9
-weight_decay=0.0001
+weight_decay=0.0005
 
 MAX_ANN_PER_IMG=30
 
-r=128 #batch size for proposals from one img
-k=16 #maximum number of proposals from one img (used during testing)
-nms_threshold=0.5 #for filtering proposals (used during testing)
+batch_size=2 # num of img per batch
+r=64 #batch size for proposals from one img
 pos_threshold=0.5
 sample_size=512
 fh=14 #input feature patch size to mask generator
@@ -38,9 +36,11 @@ fw=14
 mh=28 #output mask size of mask generator
 mw=28
 
-l_cls_alpha=0.005
+k=16 #maximum number of proposals from one img (used during testing)
+nms_threshold=0.5 #for filtering proposals (used during testing)
+
+l_cls_alpha=1
 l_bbox_alpha=1
-l_mask_alpha=0.005
 
 fpn_ckpt_path='logs/masker.ckpt'
 rpn_ckpt_path='logs/masker.ckpt'
@@ -196,7 +196,7 @@ def train_masker(step=1,fresh_fpn=True): # 4 step training
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=batch_size)
 
     #modules
-    mask_rcnn=mo.MaskRCNN(r,pos_threshold,img_size,img_size,fh,fw,mh,mw,device,visualize).to(device)
+    mask_rcnn=mo.MaskRCNN(r,pos_threshold,img_size,img_size,fh,fw,mh,mw,device).to(device)
     mask_rcnn.train()
     if step==1 or step==2:
         mask_rcnn.fpn.apply(tl.unfreeze_params)
@@ -236,7 +236,7 @@ def train_masker(step=1,fresh_fpn=True): # 4 step training
             gt_maskss=gt_maskss.to(device)
             gt_counts=gt_counts.to(device)
 
-            if step==1 or step==3:
+            if step==1 or step==3: # train rpn
                 scoress,bboxess,anchorss=mask_rcnn(imgs,True)
                 labels=label_assigner(anchorss,gt_bboxess,gt_counts)
                 sample_idxs,sample_counts=mo.sample_proposals(labels,sample_size)
@@ -272,3 +272,63 @@ def train_masker(step=1,fresh_fpn=True): # 4 step training
 train_masker(1,True)
 
 def test_masker():
+    in_channels=3
+    #load dataset
+    dataset=COCODataSet()
+    dataloader=DataLoader(dataset,batch_size=1,shuffle=True,num_workers=1)
+
+    #modules
+    mask_rcnn=mo.MaskRCNN(r,pos_threshold,img_size,img_size,fh,fw,mh,mw,device).to(device)
+    mask_rcnn.eval()
+
+    if os.path.isfile(fpn_ckpt_path):
+        mask_rcnn.fpn.load_state_dict(torch.load(fpn_ckpt_path))
+        print("Loaded fpn ckpt!")
+    if os.path.isfile(rpn_ckpt_path):
+        mask_rcnn.rpn.load_state_dict(torch.load(rpn_ckpt_path))
+        print("Loaded rpn ckpt!")
+    if os.path.isfile(masker_ckpt_path):
+        mask_rcnn.mask_generator.load_state_dict(torch.load(masker_ckpt_path))
+        print("Loaded masker ckpt!")
+
+    for i,img_batch in enumerate(dataloader):
+        imgs=img_batch['img'] # 1 x 3 x ih x iw
+        gt_bboxess=img_batch['bboxs'] # 1 x A x 4
+        gt_maskss=img_batch['masks'] # 1 x A x 1 x ih x iw
+        gt_counts=img_batch['num_ann'] # 1 x 1
+        imgs=imgs.to(device)
+        gt_bboxess=gt_bboxess.to(device)
+        gt_maskss=gt_maskss.to(device)
+        gt_counts=gt_counts.to(device)
+
+        scoress,bboxess,anchorss=mask_rcnn(imgs,True)
+        # filter out k proposals
+        proposal_filter=mo.ProposalFilter(k,nms_threshold)
+        bboxess_f,counts_f=proposal_filter(scoress,bboxess) # 1 x K x 4, 1 x 1
+        # predict masks
+        maskss=mask_rcnn.predict_mask(bboxess_f,counts_f) # 1 x K x 1 x ih x iw
+        visualize_masks(imgs[0],bboxess_f[0][:counts_f[0]],maskss[0][:counts_f[0]])
+        if i==1:
+            break
+
+def visualize_masks(img,bboxs,masks):
+    '''
+    img - 3 x ih x iw
+    bboxs - K x 4
+    masks - K x 1 x ih x iw
+    '''
+    orig_img=tl.recover_img(img)
+    cv.display_img(orig_img)
+    bboxs=bboxs.split(1)
+    masks=masks.split(1)
+    for bbox,mask in zip(bboxs,masks):
+        bbox=bbox[0]
+        mask=mask[0]
+        mask_img=img*(1-mask)+(0.2*mask)*img
+        mask_img=tl.recover_img(mask_img)
+        y1=int(round(bbox[0]))
+        x1=int(round(bbox[1]))
+        y2=int(round(bbox[2]))
+        x2=int(round(bbox[3]))
+        mask_img=cv.bbox_img(mask_img,y1,x1,y2,x2)
+        cv.display_img(mask_img)
