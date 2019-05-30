@@ -28,8 +28,9 @@ weight_decay=0.0001
 
 MAX_ANN_PER_IMG=30
 
-k=128 #maximum number of masks from one img
-nms_threshold=0.5
+r=128 #batch size for proposals from one img
+k=16 #maximum number of proposals from one img (used during testing)
+nms_threshold=0.5 #for filtering proposals (used during testing)
 pos_threshold=0.5
 sample_size=512
 fh=14 #input feature patch size to mask generator
@@ -188,22 +189,24 @@ def test_coco_dataset():
 '''
 Train the masker
 '''
-def train_masker(step=1): # 4 step training
+def train_masker(step=1,fresh_fpn=True): # 4 step training
     in_channels=3
     #load dataset
     dataset=COCODataSet()
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=batch_size)
 
     #modules
-    mask_rcnn=mo.MaskRCNN(k,nms_threshold,img_size,img_size,fh,fw,mh,mw,device,visualize).to(device)
+    mask_rcnn=mo.MaskRCNN(r,pos_threshold,img_size,img_size,fh,fw,mh,mw,device,visualize).to(device)
     mask_rcnn.train()
     if step==1 or step==2:
         mask_rcnn.fpn.apply(tl.unfreeze_params)
     else:
+        mask_rcnn.fpn.apply(tl.freeze_params)
+
+    if not fresh_fpn:
         if os.path.isfile(fpn_ckpt_path):
             mask_rcnn.fpn.load_state_dict(torch.load(fpn_ckpt_path))
             print("Loaded fpn ckpt!")
-        mask_rcnn.fpn.apply(tl.freeze_params)
 
     if os.path.isfile(rpn_ckpt_path):
         mask_rcnn.rpn.load_state_dict(torch.load(rpn_ckpt_path))
@@ -222,7 +225,7 @@ def train_masker(step=1): # 4 step training
     optimizer = torch.optim.SGD(mask_rcnn.parameters(),lr=lr,momentum=sgd_momentum,weight_decay=weight_decay)
 
     for e in range(epoch):
-        step=0
+        j=0
         for i,img_batch in enumerate(dataloader):
             imgs=img_batch['img'] # B x 3 x ih x iw
             gt_bboxess=img_batch['bboxs'] # B x A x 4
@@ -241,11 +244,9 @@ def train_masker(step=1): # 4 step training
                 l_bbox=mo.calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,sample_idxs,sample_counts)
                 loss=l_cls_alpha*l_cls+l_bbox_alpha*l_bbox
             else:
-                bboxess_f,maskss_f,prop_counts=mask_rcnn(imgs,False)
-                labels_f=label_assigner(bboxess_f,gt_bboxess,gt_counts,prop_counts,use_anchor=False) #get labels for filtered proposals
-                if labels_f is not None:
-                    sample_idxs_f,sample_counts_f=mo.sample_proposals(labels_f,k,sample_proposal=True) #sample pos from filtered proposals
-                    l_mask=mo.calc_mask_loss(bboxess_f,maskss_f,prop_counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs_f,sample_counts_f,visualize=visualize)
+                bboxess,maskss,counts=mask_rcnn(imgs,False)
+                if bboxess is not None:
+                    l_mask=mo.calc_mask_loss(bboxess,maskss,counts,gt_bboxess,gt_maskss,gt_counts,visualize=visualize)
                     loss=l_mask
                 else:
                     print("None of the proposed region is positive in step",step)
@@ -253,11 +254,21 @@ def train_masker(step=1): # 4 step training
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if step%10==0:
-                torch.save(mask_rcnn.state_dict(), masker_ckpt_path)
-                print('Epoch [{}/{}] , Step {}, Loss: {:.4f}, l_cls: {:.4f}, l_bbox: {:.4f}, l_mask: {:.4f}'
-                            .format(e+1,epoch,step,loss.item(),l_cls.item(),l_bbox.item(),l_mask.item()))
-            step+=1
+            if j%10==0:
+                if step==1 or step==2:
+                    torch.save(mask_rcnn.fpn.state_dict(), fpn_ckpt_path)
+                if step==1 or step==3:
+                    torch.save(mask_rcnn.rpn.state_dict(), rpn_ckpt_path)
+                    print('Epoch [{}/{}] , Step {}, Loss: {:.4f}, l_cls: {:.4f}, l_bbox: {:.4f}'
+                            .format(e+1,epoch,j,loss.item(),l_cls.item(),l_bbox.item(),l_mask.item()))
+                else:
+                    torch.save(mask_rcnn.mask_generator.state_dict(), masker_ckpt_path)
+                    print('Epoch [{}/{}] , Step {}, Loss: {:.4f}, l_mask: {:.4f}'
+                            .format(e+1,epoch,j,loss.item(),l_mask.item()))
+
+            j+=1
 
 #test_coco_dataset()
-train_masker(1)
+train_masker(1,True)
+
+def test_masker():

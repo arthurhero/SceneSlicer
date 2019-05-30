@@ -217,10 +217,268 @@ class AggregateLevels(nn.Module):
 
         return scoress,bboxess,anchorss 
 
+
+class ROIAlign(nn.Module):
+    def __init__(self):
+        super(ROIAlign, self).__init__()
+        '''
+        Given bboxess B x K x 4 proposed by ProposalFilter
+        and counts B x 1 indicating k of K valid bboxess
+        and feature levels p2 - p6
+
+        return cropped features from the feature levels B x K x 256 x oh x ow
+        '''
+
+    def calc_level(self,area,img_h,img_w):
+        '''
+        Given area, calculate which level this bbox belongs to
+        '''
+        img_area=area.new(1).float()
+        img_area[0]=img_h*img_w
+        ret=6+(area.pow(0.5)/img_area.pow(0.5)).log2()
+        #use p5 for all p6 level features
+        ret=ret.clone().clamp(2,5).round().long()
+        return ret
+
+
+    def forward(self,bboxess,counts,ps,img_h,img_w,output_h=16,output_w=16):
+        '''
+        ps - (p2,p3,p4,p5,p6)
+        '''
+        channel=ps[0].shape[1] #get channel number
+        croppeds=list()
+        bboxes_batch=torch.split(bboxess,1)
+        count_batch=torch.split(counts,1)
+        ps_batch=list()
+        p2_batch=torch.split(ps[0],1)
+        p3_batch=torch.split(ps[1],1)
+        p4_batch=torch.split(ps[2],1)
+        p5_batch=torch.split(ps[3],1)
+        p6_batch=torch.split(ps[4],1)
+        for i in range(len(p2_batch)):
+            p=(p2_batch[i],p3_batch[i],p4_batch[i],p5_batch[i],p6_batch[i])
+            ps_batch.append(p)
+        for bboxes,count,pp in zip(bboxes_batch,count_batch,ps_batch):
+            bboxes=bboxes[0]
+            count=count[0]
+            #an empty tensor to be filled, K x c x oh x ow
+            cropped=bboxes.new(bboxess.shape[1],channel,output_h,output_w).zero_()
+            bboxes=bboxes[:count] # k x 4
+            cropped_list=list()
+            y1=bboxes[:,0]
+            x1=bboxes[:,1]
+            y2=bboxes[:,2]
+            x2=bboxes[:,3]
+            area=(y2-y1)*(x2-x1)
+            level=self.calc_level(area,img_h,img_w)
+            bbox_batch=torch.split(bboxes,1)
+            l_batch=torch.split(level,1)
+            for bbox,l in zip(bbox_batch,l_batch):
+                bbox=bbox[0]
+                l=l[0]
+                p=pp[l-2] #corresponding feature level, 1 x 256 x h x w 
+                p_large=F.interpolate(p,size=(img_h,img_w),mode='bilinear')
+                bbox_int=bbox.round().long()
+                y1=bbox_int[0].clamp(0,img_h-1)
+                x1=bbox_int[1].clamp(0,img_w-1)
+                y2=bbox_int[2].clamp(y1.item()+1,img_h)
+                x2=bbox_int[3].clamp(x1.item()+1,img_w)
+                c=p_large[:,:,y1:y2,x1:x2]
+                c=F.interpolate(c,size=(output_h,output_w),mode='bilinear') # 1 x 256 x oh x ow
+                cropped_list.append(c)
+            cropped_valid=torch.cat(cropped_list) # k x 256 x oh x ow
+            cropped[:count]=cropped_valid # K x 256 x oh x ow
+
+            cropped=cropped.unsqueeze(0)
+            croppeds.append(cropped)
+        croppeds=torch.cat(croppeds) # B x K x 256 x oh x ow
+        return croppeds
+
+class MaskGenerator(nn.Module):
+    def __init__(self):
+        super(MaskGenerator, self).__init__()
+        '''
+        The masker head of mask-RCNN
+        Given cropped features B x K x 256 x fh x fw
+        and counts B x 1
+        return predicted masks B x K x 1 x mh x mw
+        '''
+        self.conv1=nn.Sequential(
+                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU())
+        self.conv2=nn.Sequential(
+                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU())
+        self.upsample=nn.ConvTranspose2d(256,256,kernel_size=2,stride=2)
+        self.conv3=nn.Sequential(
+                nn.Conv2d(256,128,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU())
+        self.conv4=nn.Sequential(
+                nn.Conv2d(128,1,kernel_size=1,stride=1, padding=1))
+
+    def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
+        features_batch=torch.split(featuress,1)
+        count_batch=torch.split(counts,1)
+        maskss=list()
+        for features,count in zip(features_batch,count_batch):
+            masks=features.new(featuress.shape[1],1,mh,mw).zero_().float() # K x 1 x mh x mw
+            features=features[0]
+            count=count[0]
+            features=features[:count] # k x 256 x fh x fw
+            features=self.conv1(features)
+            features=self.conv2(features)
+            features=self.upsample(features)
+            features=self.conv3(features)
+            features=self.conv4(features)
+            features=torch.sigmoid(features)
+            masks_valid=F.interpolate(features,size=(mh,mw),mode='bilinear') # k x 1 x mh x mw
+            masks[:count]=masks_valid
+            masks=masks.unsqueeze(0)
+            maskss.append(masks)
+        maskss=torch.cat(maskss) # B x K x 1 x mh x mw
+        return maskss
+
+class WholeMask(nn.Module):
+    def __init__(self):
+        super(WholeMask, self).__init__()
+        '''
+        Given bboxess B x K x 4 
+        and counts B x 1 indicating k of K valid bboxess
+        and maskss B x K x 1 x mh x mw
+
+        resize the mask to corresponding bbox, and pad it to ih and iw
+
+        return whole maskss B x K x 1 x ih x iw
+        '''
+
+    def forward(self,bboxess,counts,maskss,img_h,img_w):
+        bboxes_batch=torch.split(bboxess,1)
+        count_batch=torch.split(counts,1)
+        masks_batch=torch.split(maskss,1)
+        masks_list=list()
+        for bboxes,count,masks in zip(bboxes_batch,count_batch,masks_batch):
+            bboxes=bboxes[0]
+            count=count[0]
+            masks=masks[0]
+            bboxes=bboxes[:count] # k x 4
+            masks=masks[:count] # k x 1 x mh x mw
+            bbox_batch=torch.split(bboxes,1)
+            mask_batch=torch.split(masks,1)
+            masks_whole=list()
+            for bbox,mask in zip(bbox_batch,mask_batch):
+                bbox=bbox[0]
+                bbox_int=bbox.round().long()
+                y1=bbox_int[0].clamp(0,img_h-1)
+                x1=bbox_int[1].clamp(0,img_w-1)
+                y2=bbox_int[2].clamp(y1.item()+1,img_h)
+                x2=bbox_int[3].clamp(x1.item()+1,img_w)
+                mask_whole=mask.new(1,1,img_h,img_w).zero_().float()
+                h=y2-y1
+                w=x2-x1
+                mask_resized=F.interpolate(mask,size=(h,w)) # 1 x 1 x h x w
+                mask_whole[:,:,y1:y2,x1:x2]=mask_resized # 1 x 1 x ih x iw
+                masks_whole.append(mask_whole)
+            masks_whole=torch.cat(masks_whole) # k x 1 x ih x iw
+            masks_whole_pad=masks_whole.new(maskss.shape[1],1,img_h,img_w).zero_().float()
+            masks_whole_pad[:count]=masks_whole
+            masks_whole_pad=masks_whole_pad.unsqueeze(0)
+            masks_list.append(masks_whole_pad)
+        maskss_ret=torch.cat(masks_list) # B x K x 1 x ih x iw
+        return maskss_ret
+
+class MaskRCNN(nn.Module):
+    def __init__(self,r,pos_threshold,img_h,img_w,cf_h,cf_w,mh,mw,r,device=None,visualize=False):
+        super(MaskRCNN, self).__init__()
+        self.fpn=FeaturePyramidNet()
+        self.rpn=RPNHead()
+        self.level_aggregator=AggregateLevels(img_h,img_w,device=device)
+        self.roi_align=ROIAlign()
+        self.mask_generator=MaskGenerator()
+        self.whole_mask=WholeMask()
+
+        self.rpn.apply(tl.init_weights)
+        self.mask_generator.apply(tl.init_weights)
+
+        self.img_h=img_h
+        self.img_w=img_w
+        self.cf_h=cf_h # height of cropped feature for roi align output
+        self.cf_w=cf_w # width of cropped feature for roi align output
+        self.mh=mh # resolution of output of mask generator
+        self.mw=mw
+        self.visualize=visualize
+        self.label_assigner=AssignClsLabel(pos_threshold).to(device)
+        self.r=r # number of pos proposals sampled
+
+
+    def forward(self,x,train_RPN=True):
+        '''
+        x - a batch of imgs, B x 3 x ih x iw
+        '''
+        p6,p5,p4,p3,p2=self.fpn(x) #size: 1/64,1/32,1/16,1/8,1/4
+        p2cs,p2bp=self.rpn(p2)
+        p3cs,p3bp=self.rpn(p3)
+        p4cs,p4bp=self.rpn(p4)
+        p5cs,p5bp=self.rpn(p5)
+        p6cs,p6bp=self.rpn(p6)
+        ps=(p2,p3,p4,p5,p6)
+        css=(p2cs,p3cs,p4cs,p5cs,p6cs)
+        bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
+        scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
+        '''
+        print(bboxess)
+        print(scoress)
+        '''
+        if not train_RPN:
+            labels=self.label_assigner(bboxess,gt_bboxess,gt_counts,use_anchor=False) #get labels for proposals
+            if labels is not None:
+                sample_idxs,sample_counts=sample_proposals(labels,r,sample_proposal=True) #sample only pos from proposals
+                sample_bboxess=select_bbox(bboxess,sample_idxs,sample_counts)
+                cropped_featuress=self.roi_align(sample_bboxess,sample_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
+                maskss_small=self.mask_generator(cropped_featuress,sample_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+            else:
+                print("Zero positive proposal!")
+                return None,None,None
+            maskss=self.whole_mask(sample_bboxess,sample_counts,maskss_small,self.img_h,self.img_w)
+            return sample_bboxess,maskss,sample_counts
+        else:
+            return scoress,bboxess,anchorss
+
+def select_bbox(bboxess,sample_idxs,sample_counts):
+    '''
+    bboxess - B x N x 4
+    sample_idxs - B x R
+    sample_counts - B x 1
+
+    return sampled bboxes - B x R x 4
+    '''
+    bboxes_batch=torch.split(bboxess,1)
+    idx_batch=torch.split(idxs,1)
+    count_batch=torch.split(counts,1)
+    bboxess_ret=list()
+    for bboxes,idx,count in zip(bboxes_batch,idx_batch,count_batch):
+        bboxes=bboxes[0]
+        idx=idx[0]
+        count=count[0]
+        idx=idx[:count].clone() # get idx of positive anchors
+        bboxes=torch.index_select(bboxes.clone(),0,idx)
+        bboxes_pad=bboxes.new(sample_idxs.shape[1],4).zero_() # R x 4
+        bboxes_pad[:count]=bboxes
+        bboxes_pad=bboxes_pad.unsqueeze(0)
+        bboxess_ret.append(bboxes_pad)
+    bboxess_ret=bboxess_ret.cat(0)
+    return bboxess_ret
+
 class ProposalFilter(nn.Module):
     def __init__(self,k,nms_threshold):
         super(ProposalFilter, self).__init__()
         '''
+        Used during testing
         Given B x N x 2 class scores
         and B x N x 4 coord predictions
         filter out top k proposals according to class score
@@ -324,243 +582,6 @@ class ProposalFilter(nn.Module):
             ret_bboxess.append(ret_bboxes)
         ret_bboxess=torch.cat(ret_bboxess) #B x top_k x 4
         return ret_bboxess,counts,keeps
-
-class ROIAlign(nn.Module):
-    def __init__(self):
-        super(ROIAlign, self).__init__()
-        '''
-        Given bboxess B x K x 4 proposed by ProposalFilter
-        and counts B x 1 indicating k of K valid bboxess
-        and feature levels p2 - p6
-
-        return cropped features from the feature levels B x K x 256 x oh x ow
-        '''
-
-    def calc_level(self,area,img_h,img_w):
-        '''
-        Given area, calculate which level this bbox belongs to
-        '''
-        img_area=area.new(1).float()
-        img_area[0]=img_h*img_w
-        ret=6+(area.pow(0.5)/img_area.pow(0.5)).log2()
-        #use p5 for all p6 level features
-        ret=ret.clone().clamp(2,5).round().long()
-        return ret
-
-
-    def forward(self,bboxess,counts,ps,img_h,img_w,output_h=16,output_w=16):
-        '''
-        ps - (p2,p3,p4,p5,p6)
-        '''
-        channel=ps[0].shape[1] #get channel number
-        croppeds=list()
-        bboxes_batch=torch.split(bboxess,1)
-        count_batch=torch.split(counts,1)
-        ps_batch=list()
-        p2_batch=torch.split(ps[0],1)
-        p3_batch=torch.split(ps[1],1)
-        p4_batch=torch.split(ps[2],1)
-        p5_batch=torch.split(ps[3],1)
-        p6_batch=torch.split(ps[4],1)
-        for i in range(len(p2_batch)):
-            p=(p2_batch[i],p3_batch[i],p4_batch[i],p5_batch[i],p6_batch[i])
-            ps_batch.append(p)
-        for bboxes,count,pp in zip(bboxes_batch,count_batch,ps_batch):
-            bboxes=bboxes[0]
-            count=count[0]
-            #an empty tensor to be filled, K x c x oh x ow
-            cropped=bboxes.new(bboxess.shape[1],channel,output_h,output_w).zero_()
-            bboxes=bboxes[:count] # k x 4
-            cropped_list=list()
-            y1=bboxes[:,0]
-            x1=bboxes[:,1]
-            y2=bboxes[:,2]
-            x2=bboxes[:,3]
-            area=(y2-y1)*(x2-x1)
-            level=self.calc_level(area,img_h,img_w)
-            bbox_batch=torch.split(bboxes,1)
-            l_batch=torch.split(level,1)
-            for bbox,l in zip(bbox_batch,l_batch):
-                bbox=bbox[0]
-                l=l[0]
-                p=pp[l-2] #corresponding feature level, 1 x 256 x h x w 
-                p_large=F.interpolate(p,size=(img_h,img_w),mode='bilinear')
-                bbox_int=bbox.round().long()
-                y1=bbox_int[0].clamp(0,img_h-1)
-                x1=bbox_int[1].clamp(0,img_w-1)
-                y2=bbox_int[2].clamp(y1.item()+1,img_h)
-                x2=bbox_int[3].clamp(x1.item()+1,img_w)
-                c=p_large[:,:,y1:y2,x1:x2]
-                c=F.interpolate(c,size=(output_h,output_w),mode='bilinear') # 1 x 256 x oh x ow
-                cropped_list.append(c)
-            cropped_valid=torch.cat(cropped_list) # k x 256 x oh x ow
-            cropped[:count]=cropped_valid # K x 256 x oh x ow
-
-            cropped=cropped.unsqueeze(0)
-            croppeds.append(cropped)
-        croppeds=torch.cat(croppeds) # B x K x 256 x oh x ow
-        return croppeds
-
-class MaskGenerator(nn.Module):
-    def __init__(self):
-        super(MaskGenerator, self).__init__()
-        '''
-        Given cropped features B x K x 256 x fh x fw
-        and counts B x 1
-        return predicted masks B x K x 1 x mh x mw
-        '''
-        self.conv1=nn.Sequential(
-                nn.Conv2d(256,128,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(128),
-                nn.ReLU())
-        self.conv2=nn.Sequential(
-                nn.Conv2d(128,64,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU())
-        self.conv3=nn.Sequential(
-                nn.Conv2d(64,32,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(32),
-                nn.ReLU())
-        self.conv4=nn.Sequential(
-                nn.Conv2d(32,16,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(16),
-                nn.ReLU())
-        self.upsample=nn.ConvTranspose2d(16,16,kernel_size=2,stride=2)
-        self.mg=nn.Conv2d(16,1,kernel_size=1,stride=1)
-
-    def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
-        features_batch=torch.split(featuress,1)
-        count_batch=torch.split(counts,1)
-        maskss=list()
-        for features,count in zip(features_batch,count_batch):
-            masks=features.new(featuress.shape[1],1,mh,mw).zero_().float() # K x 1 x mh x mw
-            features=features[0]
-            count=count[0]
-            features=features[:count] # k x 256 x fh x fw
-            features=self.conv1(features)
-            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
-            features=self.conv2(features)
-            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
-            features=self.conv3(features)
-            #features=F.interpolate(features, scale_factor=2, mode='bilinear')
-            features=self.conv4(features)
-            features=self.upsample(features)
-            features=self.mg(features)
-            features=torch.sigmoid(features)
-            masks_valid=F.interpolate(features,size=(mh,mw),mode='bilinear') # k x 1 x mh x mw
-            masks[:count]=masks_valid
-            masks=masks.unsqueeze(0)
-            maskss.append(masks)
-        maskss=torch.cat(maskss) # B x K x 1 x mh x mw
-        return maskss
-
-class WholeMask(nn.Module):
-    def __init__(self):
-        super(WholeMask, self).__init__()
-        '''
-        Given bboxess B x K x 4 
-        and counts B x 1 indicating k of K valid bboxess
-        and maskss B x K x 1 x mh x mw
-
-        resize the mask to corresponding bbox, and pad it to ih and iw
-
-        return whole maskss B x K x 1 x ih x iw
-        '''
-
-    def forward(self,bboxess,counts,maskss,img_h,img_w):
-        bboxes_batch=torch.split(bboxess,1)
-        count_batch=torch.split(counts,1)
-        masks_batch=torch.split(maskss,1)
-        masks_list=list()
-        for bboxes,count,masks in zip(bboxes_batch,count_batch,masks_batch):
-            bboxes=bboxes[0]
-            count=count[0]
-            masks=masks[0]
-            bboxes=bboxes[:count] # k x 4
-            masks=masks[:count] # k x 1 x mh x mw
-            bbox_batch=torch.split(bboxes,1)
-            mask_batch=torch.split(masks,1)
-            masks_whole=list()
-            for bbox,mask in zip(bbox_batch,mask_batch):
-                bbox=bbox[0]
-                bbox_int=bbox.round().long()
-                y1=bbox_int[0].clamp(0,img_h-1)
-                x1=bbox_int[1].clamp(0,img_w-1)
-                y2=bbox_int[2].clamp(y1.item()+1,img_h)
-                x2=bbox_int[3].clamp(x1.item()+1,img_w)
-                mask_whole=mask.new(1,1,img_h,img_w).zero_().float()
-                h=y2-y1
-                w=x2-x1
-                mask_resized=F.interpolate(mask,size=(h,w)) # 1 x 1 x h x w
-                mask_whole[:,:,y1:y2,x1:x2]=mask_resized # 1 x 1 x ih x iw
-                masks_whole.append(mask_whole)
-            masks_whole=torch.cat(masks_whole) # k x 1 x ih x iw
-            masks_whole_pad=masks_whole.new(maskss.shape[1],1,img_h,img_w).zero_().float()
-            masks_whole_pad[:count]=masks_whole
-            masks_whole_pad=masks_whole_pad.unsqueeze(0)
-            masks_list.append(masks_whole_pad)
-        maskss_ret=torch.cat(masks_list) # B x K x 1 x ih x iw
-        return maskss_ret
-
-class MaskRCNN(nn.Module):
-    def __init__(self,k,nms_threshold,img_h,img_w,cf_h,cf_w,mh,mw,device=None,visualize=False):
-        super(MaskRCNN, self).__init__()
-        self.fpn=FeaturePyramidNet()
-        self.rpn=RPNHead()
-        self.level_aggregator=AggregateLevels(img_h,img_w,device=device)
-        self.proposal_filter=ProposalFilter(k,nms_threshold)
-        self.roi_align=ROIAlign()
-        self.mask_generator=MaskGenerator()
-        self.whole_mask=WholeMask()
-
-        self.rpn.apply(tl.init_weights)
-        self.mask_generator.apply(tl.init_weights)
-
-        self.img_h=img_h
-        self.img_w=img_w
-        self.cf_h=cf_h # height of cropped feature for roi align output
-        self.cf_w=cf_w # width of cropped feature for roi align output
-        self.mh=mh # resolution of output of mask generator
-        self.mw=mw
-        self.visualize=visualize
-
-    def forward(self,x,train_RPN=True):
-        '''
-        x - a batch of imgs, B x 3 x ih x iw
-        '''
-        p6,p5,p4,p3,p2=self.fpn(x) #size: 1/64,1/32,1/16,1/8,1/4
-        p2cs,p2bp=self.rpn(p2)
-        p3cs,p3bp=self.rpn(p3)
-        p4cs,p4bp=self.rpn(p4)
-        p5cs,p5bp=self.rpn(p5)
-        p6cs,p6bp=self.rpn(p6)
-        ps=(p2,p3,p4,p5,p6)
-        css=(p2cs,p3cs,p4cs,p5cs,p6cs)
-        bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
-        scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
-        '''
-        print(bboxess)
-        print(scoress)
-        '''
-        if not train_RPN:
-            #N down to K
-            filtered_bboxess,prop_counts,prop_idxs=self.proposal_filter(scoress,bboxess)
-            '''
-            if filtered_bboxess is None:
-                return scoress,bboxess,anchorss,None,None,None,None 
-            '''
-            cropped_featuress=self.roi_align(filtered_bboxess,prop_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-            maskss_small=self.mask_generator(cropped_featuress,prop_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
-            '''
-            print("mask generator mg weight!")
-            print(self.mask_generator.mg.weight)
-            print("small masks!")
-            print(maskss_small[0][:prop_counts[0]])
-            '''
-            maskss=self.whole_mask(filtered_bboxess,prop_counts,maskss_small,self.img_h,self.img_w)
-            return filtered_bboxess,maskss,prop_counts
-        else:
-            return scoress,bboxess,anchorss
 
 class AssignClsLabel(nn.Module):
     def __init__(self,pos_threshold=0.5):
@@ -822,16 +843,14 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
         l_bbox+=lb
     return l_bbox
 
-def calc_mask_loss(bboxess,maskss,counts,gt_bboxess,gt_maskss,gt_counts,sample_idxs,sample_counts,visualize=False):
+def calc_mask_loss(bboxess,maskss,counts,gt_bboxess,gt_maskss,gt_counts,visualize=False):
     '''
-    Given selected bboxess B x K x 4
-    whole maskss B x K x 1 x ih x iw
+    Given selected bboxess B x R x 4
+    whole maskss B x R x 1 x ih x iw
     proposal counts B x 1
     ground-truth bboxess B x A x 4
     ground-truth maskss B x A x 1 x ih x iw
     gt counts B x 1
-    pos sample idxs B x S
-    pos sample counts B x 1
 
     Return the l_mask binary cross entropy loss, a scalar
     '''
@@ -841,26 +860,19 @@ def calc_mask_loss(bboxess,maskss,counts,gt_bboxess,gt_maskss,gt_counts,sample_i
     gt_bboxes_batch=torch.split(gt_bboxess,1)
     gt_masks_batch=torch.split(gt_maskss,1)
     gt_count_batch=torch.split(gt_counts,1)
-    sample_idx_batch=torch.split(sample_idxs,1)
-    sample_count_batch=torch.split(sample_counts,1)
 
     l_mask=bboxess.new(1).zero_().float()
 
-    for bboxes,masks,count,gt_bboxes,gt_masks,gt_count,sample_idx,sample_count in zip(bboxes_batch,masks_batch,count_batch,gt_bboxes_batch,gt_masks_batch,gt_count_batch,sample_idx_batch,sample_count_batch):
+    for bboxes,masks,count,gt_bboxes,gt_masks,gt_count,in zip(bboxes_batch,masks_batch,count_batch,gt_bboxes_batch,gt_masks_batch,gt_count_batch):
         bboxes=bboxes[0]
         masks=masks[0]
         count=count[0]
         gt_bboxes=gt_bboxes[0]
         gt_masks=gt_masks[0]
         gt_count=gt_count[0]
-        sample_idx=sample_idx[0]
-        sample_count=sample_count[0]
 
-        bboxes=bboxes[:count].clone() # k x 4
-        masks=masks[:count].clone() # k x 1 x ih x iw
-        sample_idx=sample_idx[:sample_count].clone()
-        bboxes=torch.index_select(bboxes.clone(),0,sample_idx)
-        masks=torch.index_select(masks.clone(),0,sample_idx)
+        bboxes=bboxes[:count].clone() # r x 4
+        masks=masks[:count].clone() # r x 1 x ih x iw
 
         gt_bboxes=gt_bboxes[:gt_count].clone() # a x 4
         gt_masks=gt_masks[:gt_count].clone() # a x 1 x ih x iw
