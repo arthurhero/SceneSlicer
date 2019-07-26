@@ -142,10 +142,16 @@ class AggregateLevels(nn.Module):
         height = height.clone() * torch.exp(deltas[:,:,2])
         width = width.clone() * torch.exp(deltas[:,:,3])
         # Convert to y1, x1, y2, x2
+        '''
         y1 = (center_y-0.5*height).clamp(min=0.0,max=self.ih)
         x1 = (center_x-0.5*width).clamp(min=0.0,max=self.iw)
         y2 = (center_y+0.5*height).clamp(min=0.0,max=self.ih)
         x2 = (center_x+0.5*width).clamp(min=0.0,max=self.iw)
+        '''
+        y1 = (center_y-0.5*height)
+        x1 = (center_x-0.5*width)
+        y2 = (center_y+0.5*height)
+        x2 = (center_x+0.5*width)
         y1=y1.unsqueeze(2)
         x1=x1.unsqueeze(2)
         y2=y2.unsqueeze(2)
@@ -241,12 +247,15 @@ class ROIAlign(nn.Module):
         return ret
 
 
-    def forward(self,bboxess,counts,ps,img_h,img_w,output_h=16,output_w=16):
+    def forward(self,imgs,bboxess,counts,ps,img_h,img_w,output_h=16,output_w=16):
         '''
+        imgs - B x 3 x ih x iw
+        p - B x 256 x h x w
         ps - (p2,p3,p4,p5,p6)
         '''
         channel=ps[0].shape[1] #get channel number
         croppeds=list()
+        img_batch=torch.split(imgs,1)
         bboxes_batch=torch.split(bboxess,1)
         count_batch=torch.split(counts,1)
         ps_batch=list()
@@ -258,11 +267,11 @@ class ROIAlign(nn.Module):
         for i in range(len(p2_batch)):
             p=(p2_batch[i],p3_batch[i],p4_batch[i],p5_batch[i],p6_batch[i])
             ps_batch.append(p)
-        for bboxes,count,pp in zip(bboxes_batch,count_batch,ps_batch):
+        for img,bboxes,count,pp in zip(img_batch,bboxes_batch,count_batch,ps_batch):
             bboxes=bboxes[0]
             count=count[0]
             #an empty tensor to be filled, K x c x oh x ow
-            cropped=bboxes.new(bboxess.shape[1],channel,output_h,output_w).zero_()
+            cropped=bboxes.new(bboxess.shape[1],channel+3,output_h,output_w).zero_()
             bboxes=bboxes[:count] # k x 4
             cropped_list=list()
             y1=bboxes[:,0]
@@ -283,16 +292,72 @@ class ROIAlign(nn.Module):
                 x1=bbox_int[1].clamp(0,img_w-1)
                 y2=bbox_int[2].clamp(y1.item()+1,img_h)
                 x2=bbox_int[3].clamp(x1.item()+1,img_w)
-                c=p_large[:,:,y1:y2,x1:x2]
-                c=F.interpolate(c,size=(output_h,output_w),mode='bilinear') # 1 x 256 x oh x ow
+                p_c=p_large[:,:,y1:y2,x1:x2]
+                img_c=img[:,:,y1:y2,x1:x2]
+                c=torch.cat([img_c,p_c],dim=1)
+                c=F.interpolate(c,size=(output_h,output_w),mode='bilinear') # 1 x 259 x oh x ow
                 cropped_list.append(c)
-            cropped_valid=torch.cat(cropped_list) # k x 256 x oh x ow
-            cropped[:count]=cropped_valid # K x 256 x oh x ow
+            cropped_valid=torch.cat(cropped_list) # k x 259 x oh x ow
+            cropped[:count]=cropped_valid # K x 259 x oh x ow
 
             cropped=cropped.unsqueeze(0)
             croppeds.append(cropped)
-        croppeds=torch.cat(croppeds) # B x K x 256 x oh x ow
+        croppeds=torch.cat(croppeds) # B x K x 259 x oh x ow
         return croppeds
+
+class ClassGenerator(nn.Module):
+    def __init__(self):
+        super(ClassGenerator, self).__init__()
+        '''
+        The classification head of mask-RCNN
+        Given cropped features B x K x 256 x fh x fw
+        and counts B x 1
+        return predicted classes B x K x 91
+        '''
+        self.conv1=nn.Sequential(
+                nn.Conv2d(259,256,kernel_size=3,stride=2, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU())
+        self.conv2=nn.Sequential(
+                nn.Conv2d(256,128,kernel_size=3,stride=2, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU())
+        self.conv3=nn.Sequential(
+                nn.Conv2d(128,64,kernel_size=3,stride=2, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU())
+        self.conv4=nn.Sequential(
+                nn.Conv2d(64,64,kernel_size=3,stride=2, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU())
+        self.fc1=nn.Linear(1024,1024)
+        self.fc2=nn.Linear(1024,91)
+
+    def forward(self,featuress,counts,fh=14,fw=14):
+        features_batch=torch.split(featuress,1)
+        count_batch=torch.split(counts,1)
+        classes=list()
+        for features,count in zip(features_batch,count_batch):
+            features=features[0]
+            count=count[0]
+            features=features[:count] # k x 259 x fh x fw
+            #print(features.shape)
+            #features=F.interpolate(features,size=(7,7),mode='bilinear') # k x 259 x 7 x 7
+            #print(features.shape)
+            features=self.conv1(features)
+            features=self.conv2(features)
+            features=self.conv3(features)
+            features=self.conv4(features)
+            features=features.clone().view(count,-1)
+            features=self.fc1(features)
+            features=self.fc2(features) # k x 91
+            cls=features.new(featuress.shape[1],91).zero_()
+            cls[:count]=features
+            cls=cls.unsqueeze(0)
+            classes.append(cls)
+            #print(self.fc1.weight)
+        classes=torch.cat(classes,dim=0) # B x K x 91
+        return classes
 
 class MaskGenerator(nn.Module):
     def __init__(self):
@@ -304,38 +369,54 @@ class MaskGenerator(nn.Module):
         return predicted masks B x K x 1 x mh x mw
         '''
         self.conv1=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.Conv2d(259,256,kernel_size=3,stride=1, padding=1),
                 nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
                 nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
                 nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
                 nn.BatchNorm2d(256),
                 nn.ReLU())
         self.conv2=nn.Sequential(
-                nn.Conv2d(256,256,kernel_size=3,stride=1, padding=1),
+                nn.Conv2d(259,256,kernel_size=3,stride=1, padding=1),
                 nn.BatchNorm2d(256),
                 nn.ReLU())
         self.upsample=nn.ConvTranspose2d(256,256,kernel_size=2,stride=2)
         self.conv3=nn.Sequential(
-                nn.Conv2d(256,128,kernel_size=3,stride=1, padding=1),
-                nn.BatchNorm2d(128),
+                nn.Conv2d(259,256,kernel_size=3,stride=1, padding=1),
+                nn.BatchNorm2d(256),
                 nn.ReLU())
         self.conv4=nn.Sequential(
-                nn.Conv2d(128,1,kernel_size=1,stride=1, padding=0))
+                nn.Conv2d(256,91,kernel_size=1,stride=1, padding=0))
 
-    def forward(self,featuress,counts,fh=14,fw=14,mh=28,mw=28):
+    def forward(self,featuress,counts,labelss,fh=14,fw=14,mh=28,mw=28):
         features_batch=torch.split(featuress,1)
         count_batch=torch.split(counts,1)
+        labels_batch=torch.split(labelss,1)
         maskss=list()
-        for features,count in zip(features_batch,count_batch):
+        for features,count,labels in zip(features_batch,count_batch,labels_batch):
             masks=features.new(featuress.shape[1],1,mh,mw).zero_().float() # K x 1 x mh x mw
             features=features[0]
             count=count[0]
-            features=features[:count] # k x 256 x fh x fw
+            labels=labels[0]
+            features=features[:count] # k x 259 x fh x fw
+            labels=labels[:count] # k
+            imgs = features[:,:3] # k x 3 x fh x fw
+            
+            '''
+            for i in range(imgs.shape[0]):
+                cv.display_torch_img(imgs[i])
+                '''
+
             features=self.conv1(features)
+            features=torch.cat([imgs,features],dim=1)
             features=self.conv2(features)
-            features=self.upsample(features)
+            #features=self.upsample(features)
+            features=torch.cat([imgs,features],dim=1)
             features=self.conv3(features)
-            features=self.conv4(features)
+            features=self.conv4(features) # k x 91 x fh x fw
+
+            labels=(labels-1).view(-1,1,1,1).expand(-1,-1,features.shape[2],features.shape[3]) # k x 1 x fh x fw
+            features=features.gather(dim=1,index=labels) # k x 1 x fh x fw
+
             features=torch.sigmoid(features)
             masks_valid=F.interpolate(features,size=(mh,mw),mode='bilinear') # k x 1 x mh x mw
             masks[:count]=masks_valid
@@ -393,16 +474,18 @@ class WholeMask(nn.Module):
         return maskss_ret
 
 class MaskRCNN(nn.Module):
-    def __init__(self,r,pos_threshold,img_h,img_w,cf_h,cf_w,mh,mw,r,device=None):
+    def __init__(self,r,pos_threshold,img_h,img_w,cf_h,cf_w,mh,mw,device=None):
         super(MaskRCNN, self).__init__()
         self.fpn=FeaturePyramidNet()
         self.rpn=RPNHead()
         self.level_aggregator=AggregateLevels(img_h,img_w,device=device)
         self.roi_align=ROIAlign()
+        self.class_generator=ClassGenerator()
         self.mask_generator=MaskGenerator()
         self.whole_mask=WholeMask()
 
         self.rpn.apply(tl.init_weights)
+        self.class_generator.apply(tl.init_weights)
         self.mask_generator.apply(tl.init_weights)
 
         self.img_h=img_h
@@ -415,54 +498,57 @@ class MaskRCNN(nn.Module):
         self.r=r # number of pos proposals sampled
 
 
-    def forward(self,x,train_RPN=True):
+    def forward(self,x,train_RPN=True,gt_bboxess=None,gt_counts=None,gt_labelss=None):
         '''
         x - a batch of imgs, B x 3 x ih x iw
         '''
         p6,p5,p4,p3,p2=self.fpn(x) #size: 1/64,1/32,1/16,1/8,1/4
-        p2cs,p2bp=self.rpn(p2)
-        p3cs,p3bp=self.rpn(p3)
-        p4cs,p4bp=self.rpn(p4)
-        p5cs,p5bp=self.rpn(p5)
-        p6cs,p6bp=self.rpn(p6)
         ps=(p2,p3,p4,p5,p6)
         self.ps=ps
-        css=(p2cs,p3cs,p4cs,p5cs,p6cs)
-        bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
-        scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
-        '''
-        print(bboxess)
-        print(scoress)
-        '''
-        if not train_RPN:
+
+        if train_RPN:
+            p2cs,p2bp=self.rpn(p2)
+            p3cs,p3bp=self.rpn(p3)
+            p4cs,p4bp=self.rpn(p4)
+            p5cs,p5bp=self.rpn(p5)
+            p6cs,p6bp=self.rpn(p6)
+            css=(p2cs,p3cs,p4cs,p5cs,p6cs)
+            bps=(p2bp,p3bp,p4bp,p5bp,p6bp)
+            scoress,bboxess,anchorss=self.level_aggregator(css,bps,self.img_h,self.img_w)
+            return scoress,bboxess,anchorss
+
+        else:
+            '''
             labels=self.label_assigner(bboxess,gt_bboxess,gt_counts,use_anchor=False) #get labels for proposals
             if labels is not None:
-                sample_idxs,sample_counts=sample_proposals(labels,r,sample_proposal=True) #sample only pos from proposals
+                sample_idxs,sample_counts=sample_proposals(labels,self.r,sample_proposal=True) #sample only pos from proposals
                 sample_bboxess=select_bbox(bboxess,sample_idxs,sample_counts)
-                cropped_featuress=self.roi_align(sample_bboxess,sample_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-                maskss_small=self.mask_generator(cropped_featuress,sample_counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
-                maskss=self.whole_mask(sample_bboxess,sample_counts,maskss_small,self.img_h,self.img_w)
-                return sample_bboxess,maskss,sample_counts
-            else:
-                print("Zero positive proposal!")
-                return None,None,None
-        else:
-            return scoress,bboxess,anchorss
+                '''
+            cropped_featuress=self.roi_align(x,gt_bboxess,gt_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
+            classes=self.class_generator(cropped_featuress,gt_counts)
+            maskss_small=self.mask_generator(cropped_featuress,gt_counts,gt_labelss,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+            maskss=self.whole_mask(gt_bboxess,gt_counts,maskss_small,self.img_h,self.img_w)
+            return classes,maskss
+            '''
+            return classes,None
+            '''
 
     def predict_mask(self,bboxess,counts):
         '''
         Predict mask for filtered bboxess
         '''
         cropped_featuress=self.roi_align(bboxess,counts,self.ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-        maskss_small=self.mask_generator(cropped_featuress,counts,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
+        classes=self.class_generator(cropped_featuress,gt_counts) # B x K x 91
+        labelss=torch.argmax(classes,dim=-1)
+        maskss_small=self.mask_generator(cropped_featuress,counts,labelss,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
         maskss=self.whole_mask(bboxess,counts,maskss_small,self.img_h,self.img_w)
         return maskss
 
-def select_bbox(bboxess,sample_idxs,sample_counts):
+def select_bbox(bboxess,idxs,counts):
     '''
     bboxess - B x N x 4
-    sample_idxs - B x R
-    sample_counts - B x 1
+    idxs - B x R
+    counts - B x 1
 
     return sampled bboxes - B x R x 4
     '''
@@ -476,11 +562,11 @@ def select_bbox(bboxess,sample_idxs,sample_counts):
         count=count[0]
         idx=idx[:count].clone() # get idx of positive anchors
         bboxes=torch.index_select(bboxes.clone(),0,idx)
-        bboxes_pad=bboxes.new(sample_idxs.shape[1],4).zero_() # R x 4
+        bboxes_pad=bboxes.new(idxs.shape[1],4).zero_() # R x 4
         bboxes_pad[:count]=bboxes
         bboxes_pad=bboxes_pad.unsqueeze(0)
         bboxess_ret.append(bboxes_pad)
-    bboxess_ret=bboxess_ret.cat(0)
+    bboxess_ret=torch.cat(bboxess_ret,dim=0)
     return bboxess_ret
 
 class ProposalFilter(nn.Module):
@@ -684,18 +770,26 @@ def sample_proposals(labels,S,sample_proposal=False):
             p=min(pos_num,S)
             n=0
         else:
-            p=min(pos_num,S/4)
+            p=min(pos_num,S//4)
             n=min(neg_num,S-p)
+        if p == 0:
+            return None,None
         pos_count[0]=p
         idx=labels.new(S).zero_().long()
         idxx_pos=torch.randperm(idx_pos.shape[0])
         idxx_pos=idxx_pos[:p].clone()
+        idxx_pos_=idx_pos.new(idxx_pos.shape).long()
+        idxx_pos_[:]=idxx_pos
+        idxx_pos=idxx_pos_.clone()
         idx_pos_selected=torch.index_select(idx_pos,0,idxx_pos)
         idx_pos_selected=idx_pos_selected.clone().view(-1)
         idx[:p]=idx_pos_selected
         if not sample_proposal:
             idxx_neg=torch.randperm(idx_neg.shape[0])
-            idxx_neg=idxx_pos[:n].clone()
+            idxx_neg=idxx_neg[:n].clone()
+            idxx_neg_=idx_neg.new(idxx_neg.shape).long()
+            idxx_neg_[:]=idxx_neg
+            idxx_neg=idxx_neg_.clone()
             idx_neg_selected=torch.index_select(idx_neg,0,idxx_neg)
             idx_neg_selected=idx_neg_selected.clone().view(-1)
             idx[p:p+n]=idx_neg_selected
@@ -833,101 +927,91 @@ def calc_bbox_loss(bboxess,anchorss,gt_bboxess,gt_counts,idxs,counts):
         tis=torch.cat(tis) # s x 4
         gtis=torch.cat(gtis) # s x 4
         lb=F.smooth_l1_loss(tis,gtis)
-        l_bbox+=lb
+        l_bbox+=(lb/count.float())
     return l_bbox
 
-def calc_mask_loss(bboxess,maskss,counts,gt_bboxess,gt_maskss,gt_counts,visualize=False):
+def calc_class_loss(classes,gt_labelss,gt_counts):
     '''
-    Given selected bboxess B x R x 4
+    classes - B x K x 91
+    gt_labelss - B x K
+    gt counts B x 1
+
+    Return the l_class cross entropy loss, a scalar
+    '''
+    classes_batch=torch.split(classes,1)
+    gt_labels_batch=torch.split(gt_labelss,1)
+    gt_count_batch=torch.split(gt_counts,1)
+
+    l_class=classes.new(1).zero_().float()
+    correct=0
+    total=0
+
+    for cls,gt_labels,gt_count in zip(classes_batch,gt_labels_batch,gt_count_batch):
+        cls=cls[0]
+        gt_labels=gt_labels[0]
+        gt_count=gt_count[0]
+
+        cls=cls[:gt_count] # k x 91
+        gt_labels=gt_labels[:gt_count] # k
+
+        lc=F.cross_entropy(cls,gt_labels)
+        l_class+=lc
+
+        _, predicted = cls.max(1)
+        correct+=predicted.eq(gt_labels).sum().item()
+        total+=gt_labels.size(0)
+    return l_class*100,correct/total
+
+def calc_mask_loss(maskss,gt_maskss,gt_counts,visualize=False):
+    '''
     whole maskss B x R x 1 x ih x iw
-    proposal counts B x 1
-    ground-truth bboxess B x A x 4
     ground-truth maskss B x A x 1 x ih x iw
     gt counts B x 1
 
     Return the l_mask binary cross entropy loss, a scalar
     '''
-    bboxes_batch=torch.split(bboxess,1)
     masks_batch=torch.split(maskss,1)
-    count_batch=torch.split(counts,1)
-    gt_bboxes_batch=torch.split(gt_bboxess,1)
     gt_masks_batch=torch.split(gt_maskss,1)
     gt_count_batch=torch.split(gt_counts,1)
 
-    l_mask=bboxess.new(1).zero_().float()
+    l_mask=gt_maskss.new(1).zero_().float()
 
-    for bboxes,masks,count,gt_bboxes,gt_masks,gt_count,in zip(bboxes_batch,masks_batch,count_batch,gt_bboxes_batch,gt_masks_batch,gt_count_batch):
-        bboxes=bboxes[0]
+    for masks,gt_masks,gt_count in zip(masks_batch,gt_masks_batch,gt_count_batch):
         masks=masks[0]
-        count=count[0]
-        gt_bboxes=gt_bboxes[0]
         gt_masks=gt_masks[0]
         gt_count=gt_count[0]
 
-        bboxes=bboxes[:count].clone() # r x 4
-        masks=masks[:count].clone() # r x 1 x ih x iw
-
-        gt_bboxes=gt_bboxes[:gt_count].clone() # a x 4
+        masks=masks[:gt_count].clone() # a x 1 x ih x iw
         gt_masks=gt_masks[:gt_count].clone() # a x 1 x ih x iw
-        gt_y1=gt_bboxes[:,0]
-        gt_x1=gt_bboxes[:,1]
-        gt_y2=gt_bboxes[:,2]
-        gt_x2=gt_bboxes[:,3]
-        gt_area=(gt_y2-gt_y1)*(gt_x2-gt_x1)
-        bbox_batch=torch.split(bboxes,1)
-        mask_batch=torch.split(masks,1)
-        ma=list()
-        gma=list()
-        for bbox,mask in zip(bbox_batch,mask_batch):
-            #find the gt bbox that has the largest iou with the current bbox
-            bbox=bbox[0]
-            y1=bbox[0]
-            x1=bbox[1]
-            y2=bbox[2]
-            x2=bbox[3]
-            area=(y2-y1)*(x2-x1)
-            gt_yy1=gt_y1.clamp(min=y1.item(),max=y2.item())
-            gt_xx1=gt_x1.clamp(min=x1.item(),max=x2.item())
-            gt_yy2=gt_y2.clamp(min=y1.item(),max=y2.item())
-            gt_xx2=gt_x2.clamp(min=x1.item(),max=x2.item())
-            inter=(gt_yy2-gt_yy1)*(gt_xx2-gt_xx1)
-            union=(gt_area+area)-inter
-            iou=inter/union
-            _,max_idx=iou.max(dim=0)
-            gt_mask=gt_masks[max_idx] # 1 x ih x iw
-            if visualize:
-                gt_bbox=gt_bboxes[max_idx]
-                mask_visualizer(bbox.clone(),mask.clone().squeeze(),gt_bbox.clone(),gt_mask.clone().squeeze())
-            gt_mask=gt_mask.unsqueeze(0)
-            ma.append(mask)
-            gma.append(gt_mask)
-        ma=torch.cat(ma) # k x 1 x ih x iw
-        gma=torch.cat(gma) # k x 1 x ih x iw
-        lm=F.binary_cross_entropy(ma,gma)
-        l_mask+=lm
-    return l_mask
+
+        lm=F.binary_cross_entropy(masks,gt_masks,reduction='mean')
+        l_mask+=(lm/gt_count.float())
+        if visualize:
+            for i in range(gt_count.item()):
+                mask_visualizer(None,masks[i][0],None,gt_masks[i][0])
+    return l_mask*1000
 
 def mask_visualizer(bbox,mask,gt_bbox,gt_mask):
-    bbox=bbox.cpu().detach()
+    #bbox=bbox.cpu().detach()
     mask=mask.cpu().detach()
-    gt_bbox=gt_bbox.cpu().detach()
+    #gt_bbox=gt_bbox.cpu().detach()
     gt_mask=gt_mask.cpu().detach()
-    bbox=bbox.round().long()
-    gt_bbox=gt_bbox.round().long()
+    #bbox=bbox.round().long()
+    #gt_bbox=gt_bbox.round().long()
     mask=torch.where(mask>0.5,torch.Tensor([1]),torch.Tensor([0]))
     gt_mask=torch.where(gt_mask>0.5,torch.Tensor([1]),torch.Tensor([0]))
     mask=mask.long()
     gt_mask=gt_mask.long()
     mask=mask*100
     gt_mask=gt_mask*200
-    bbox=bbox.numpy()
-    gt_bbox=gt_bbox.numpy()
+    #bbox=bbox.numpy()
+    #gt_bbox=gt_bbox.numpy()
     mask=mask.numpy()
     gt_mask=gt_mask.numpy()
     img=np.dstack((mask,mask,mask))
     img+=np.dstack((gt_mask,gt_mask,gt_mask))
     img=img.clip(0,255)
     img=img.astype(np.uint8)
-    img=cv.bbox_img(img,bbox[0],bbox[1],bbox[2],bbox[3],(255,0,0))
-    img=cv.bbox_img(img,gt_bbox[0],gt_bbox[1],gt_bbox[2],gt_bbox[3],(0,255,0))
+    #img=cv.bbox_img(img,bbox[0],bbox[1],bbox[2],bbox[3],(255,0,0))
+    #img=cv.bbox_img(img,gt_bbox[0],gt_bbox[1],gt_bbox[2],gt_bbox[3],(0,255,0))
     cv.display_img(img)

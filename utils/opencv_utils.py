@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import random
 
+import torch
+
 def add_alpha(img):
     img = cv2.cvtColor(img,cv2.COLOR_RGB2RGBA)
     return img
@@ -33,6 +35,13 @@ def display_img(img):
     cv2.imshow('img',img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+def display_torch_img(img):
+    img=img.cpu().detach()
+    img = (img+0.5).clamp(0,1.0)
+    img = (img*255).long().permute(1,2,0).numpy()
+    img=img.astype(np.uint8)
+    display_img(img)
 
 def display_img_file(fname):
     img = cv2.imread(fname)

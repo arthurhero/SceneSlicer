@@ -344,7 +344,6 @@ class PainterNet(nn.Module):
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True)
         else:
             self.ca=ContextualAttention(patch_size=3,rate=2,fuse_kernel_size=3,softmax_scale=10.,fuse=True,device=device).to(device)
-        tl.freeze_params(self.ca)
         self.pmconv7=GatedConv2d(128,128,3,stride=1,padding=pad)
         self.pmconv8=GatedConv2d(128,128,3,stride=1,padding=pad)
 
