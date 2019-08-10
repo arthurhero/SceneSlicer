@@ -40,7 +40,7 @@ lr=0.001
 l1_alpha=1
 l1_coarse_alpha=0
 fm_alpha=0
-patch_alpha=0.05
+patch_alpha=0.001
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
@@ -220,7 +220,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                     torch.save(disnet.state_dict(), dis_ckpt_path)
                 d_step+=1
             else:
-                l1_loss=(predictions-imgs).abs().sum()
+                l1_loss=(predictions-imgs).abs().mean()
                 feature_match_loss=(pos_feature-neg_feature).abs().mean()
                 loss=l1_loss*l1_alpha+feature_match_loss*fm_alpha
                 if not fix_coarse:
@@ -245,6 +245,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                 g_step+=1
 
             '''
+            '''
             sample_orig=tl.recover_img(imgs[0])
             sample_incomplete=tl.recover_img(incomplete_imgs[0])
             sample_coarse=tl.recover_img(x_coarse[0])
@@ -255,7 +256,6 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
             cv.display_img(sample_predicted)
             if step/gan_iteration>1:
                 break
-                '''
             step+=1
 
 train_painter(max_ratio=0.05,pretrain=True,fix_coarse=False,ob=False)
