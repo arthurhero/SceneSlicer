@@ -3,7 +3,7 @@ from threading import Thread,Lock
 import subprocess
 import random
 import numpy as np
-import opencv_utils as cv
+import utils.opencv_utils as cv
 
 def under_prob(prob):
     x=random.randint(0,9999)

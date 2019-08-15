@@ -33,10 +33,10 @@ ob_dis_ckpt_path=''
 bg_in_channels=3
 ob_in_channels=4
 gan_iteration=5
-batch_size=1
+batch_size=2
 img_size=512
 epoch=100
-lr=0.001
+lr=0.0001
 l1_alpha=1
 l1_coarse_alpha=0
 fm_alpha=0
@@ -124,7 +124,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=8)
     '''
     #use coco for now
-    dataset=COCODataSet(max_ratio=max_ratio)
+    dataset=COCODataSet(max_ratio=max_ratio,random_mask=True)
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=True,num_workers=batch_size)
 
     gennet=po.PainterNet(in_channels,pretrain,fix_coarse,device).to(device)
@@ -169,7 +169,6 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                 disnet.apply(tl.unfreeze_params)
                 gennet.apply(tl.freeze_params)
 
-            '''
             actual_batch_size=img_batch.shape[0]
             img_batch=img_batch.to(device)
             imgs=img_batch[:,:in_channels]
@@ -185,6 +184,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
             counts=counts.to(device)
             imgs,masks,incomplete_imgs=apply_masks(imgs,maskss,counts)
             actual_batch_size=imgs.shape[0]
+            '''
 
             #get predictions from generator
             predictions=None
@@ -245,7 +245,6 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                 g_step+=1
 
             '''
-            '''
             sample_orig=tl.recover_img(imgs[0])
             sample_incomplete=tl.recover_img(incomplete_imgs[0])
             sample_coarse=tl.recover_img(x_coarse[0])
@@ -256,6 +255,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
             cv.display_img(sample_predicted)
             if step/gan_iteration>1:
                 break
+            '''
             step+=1
 
-train_painter(max_ratio=0.05,pretrain=True,fix_coarse=False,ob=False)
+train_painter(max_ratio=0.10,pretrain=True,fix_coarse=False,ob=False)

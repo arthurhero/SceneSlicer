@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+import utils.dataloader as dl
 import utils.opencv_utils as cv
 import utils.tools as tl
 
@@ -70,11 +71,12 @@ class COCODataSet(Dataset):
     '''
     COCO Dataset (only return segmentation and bbox)
     '''
-    def __init__(self,min_ratio=0.0,max_ratio=1.0):
+    def __init__(self,min_ratio=0.0,max_ratio=1.0,random_mask=False):
         self.coco=COCO(ann_file)
         self.imgIds=self.coco.getImgIds()
         self.min_ratio=min_ratio
         self.max_ratio=max_ratio
+        self.random_mask=random_mask
 
     def __len__(self):
         return len(self.imgIds)
@@ -86,11 +88,16 @@ class COCODataSet(Dataset):
             imgId=self.imgIds[idx]
             imgData=coco.loadImgs([imgId])[0]
             img=cv.load_img(data_folder+imgData['file_name'])
-            annIds=coco.getAnnIds(imgIds=[imgId])
-            anns=coco.loadAnns(annIds)
-            bboxs=list()
-            masks=list()
-            labels=list()
+            if self.random_mask:
+                img=dl.process_img(img,crop_size=img_size,resize=False,sample_num=1,alpha=False,normalize=True,pytorch=True,random_mask=False,ones_boundary=False)
+                img=img[0]
+                img=torch.FloatTensor(img)
+                pts=cv.generate_random_vertices(img_size,img_size,dis_max_ratio=self.max_ratio)
+                mask=cv.generate_polygon_mask(img_size,img_size,pts)
+                mask=mask.transpose(2,0,1)
+                mask=torch.FloatTensor(mask)
+                img_mask=torch.cat([img,mask],dim=0) # 4 x ih x iw
+                return img_mask
             height=img.shape[0]
             width=img.shape[1]
             img=img.astype(np.float32)
@@ -98,6 +105,11 @@ class COCODataSet(Dataset):
             if len(img.shape)==2:
                 img = np.dstack((img,img,img))
             img=img.transpose(2,0,1)
+            annIds=coco.getAnnIds(imgIds=[imgId])
+            anns=coco.loadAnns(annIds)
+            bboxs=list()
+            masks=list()
+            labels=list()
             for ann in anns:
                 if ann['iscrowd'] == 1:
                     continue
