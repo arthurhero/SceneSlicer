@@ -414,7 +414,7 @@ class MaskGenerator(nn.Module):
             features=self.conv3(features)
             features=self.conv4(features) # k x 91 x fh x fw
 
-            labels=(labels-1).view(-1,1,1,1).expand(-1,-1,features.shape[2],features.shape[3]) # k x 1 x fh x fw
+            labels=labels.view(-1,1,1,1).expand(-1,-1,features.shape[2],features.shape[3]) # k x 1 x fh x fw
             features=features.gather(dim=1,index=labels) # k x 1 x fh x fw
 
             features=torch.sigmoid(features)
@@ -525,24 +525,15 @@ class MaskRCNN(nn.Module):
                 sample_bboxess=select_bbox(bboxess,sample_idxs,sample_counts)
                 '''
             cropped_featuress=self.roi_align(x,gt_bboxess,gt_counts,ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-            classes=self.class_generator(cropped_featuress,gt_counts)
+            classes=self.class_generator(cropped_featuress,gt_counts) # B x K x 91
+            if gt_labelss is None:
+                _,gt_labelss=classes.max(2) # B x K
             maskss_small=self.mask_generator(cropped_featuress,gt_counts,gt_labelss,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
             maskss=self.whole_mask(gt_bboxess,gt_counts,maskss_small,self.img_h,self.img_w)
             return classes,maskss
             '''
             return classes,None
             '''
-
-    def predict_mask(self,bboxess,counts):
-        '''
-        Predict mask for filtered bboxess
-        '''
-        cropped_featuress=self.roi_align(bboxess,counts,self.ps,self.img_h,self.img_w,self.cf_h,self.cf_w)
-        classes=self.class_generator(cropped_featuress,gt_counts) # B x K x 91
-        labelss=torch.argmax(classes,dim=-1)
-        maskss_small=self.mask_generator(cropped_featuress,counts,labelss,fh=self.cf_h,fw=self.cf_w,mh=self.mh,mw=self.mw)
-        maskss=self.whole_mask(bboxess,counts,maskss_small,self.img_h,self.img_w)
-        return maskss
 
 def select_bbox(bboxess,idxs,counts):
     '''

@@ -245,7 +245,6 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                 g_step+=1
 
             '''
-            '''
             sample_orig=tl.recover_img(imgs[0])
             sample_incomplete=tl.recover_img(incomplete_imgs[0])
             sample_coarse=tl.recover_img(x_coarse[0])
@@ -256,6 +255,24 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
             cv.display_img(sample_predicted)
             if step/gan_iteration>1:
                 break
+            '''
             step+=1
 
-train_painter(max_ratio=0.20,pretrain=False,fix_coarse=False,ob=False)
+def test_painter(img,mask):
+    '''
+    img, an img with holes, 3 x ih x iw
+    mask, 1 x ih x iw
+    '''
+    gennet=po.PainterNet(img.shape[0],False,False,device).to(device)
+    gennet.eval()
+    if os.path.isfile(bg_gen_ckpt_path):
+        gennet.load_state_dict(torch.load(bg_gen_ckpt_path))
+        print("Loaded gen ckpt!")
+    imgs=img.unsqueeze(0)
+    masks=mask.unsqueeze(0)
+    _,x=gennet(imgs,masks)
+    predictions=x*masks+imgs # 1 x 3 x ih x iw
+    return predictions[0]
+
+if __name__=='__main__':
+    train_painter(max_ratio=0.20,pretrain=False,fix_coarse=False,ob=False)
