@@ -362,7 +362,7 @@ class PainterNet(nn.Module):
         mask - B x 1 x h x w
         '''
         #freeze some layers
-        tl.freeze_params(self.ca)
+        #tl.freeze_params(self.ca)
         if self.fix_coarse:
             self.conv1.apply(tl.freeze_params)
             self.conv2.apply(tl.freeze_params)

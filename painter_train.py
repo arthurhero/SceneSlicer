@@ -36,11 +36,11 @@ gan_iteration=5
 batch_size=2
 img_size=512
 epoch=100
-lr=0.0001
+lr=0.000001
 l1_alpha=1
-l1_coarse_alpha=0
+l1_coarse_alpha=0.01
 fm_alpha=0
-patch_alpha=0.001
+patch_alpha=0.005
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
@@ -245,6 +245,7 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
                 g_step+=1
 
             '''
+            '''
             sample_orig=tl.recover_img(imgs[0])
             sample_incomplete=tl.recover_img(incomplete_imgs[0])
             sample_coarse=tl.recover_img(x_coarse[0])
@@ -255,7 +256,6 @@ def train_painter(max_ratio=1,pretrain=False,fix_coarse=False,ob=False):
             cv.display_img(sample_predicted)
             if step/gan_iteration>1:
                 break
-            '''
             step+=1
 
-train_painter(max_ratio=0.10,pretrain=True,fix_coarse=False,ob=False)
+train_painter(max_ratio=0.20,pretrain=False,fix_coarse=False,ob=False)

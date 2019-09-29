@@ -21,7 +21,7 @@ import masker_ops as mo
 
 img_size=512 #size of input img
 epoch=20
-lr=0.000005
+lr=0.0000001
 sgd_momentum=0.9
 weight_decay=0.0005
 
@@ -402,4 +402,4 @@ def visualize_masks(img,bboxs,masks):
         cv.display_img(mask_img)
 
 #test_coco_dataset()
-#train_masker(2,fresh_fpn=False,visualize=False)
+train_masker(4,fresh_fpn=False,visualize=False)
