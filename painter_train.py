@@ -268,9 +268,10 @@ def test_painter(img,mask):
     if os.path.isfile(bg_gen_ckpt_path):
         gennet.load_state_dict(torch.load(bg_gen_ckpt_path))
         print("Loaded gen ckpt!")
-    imgs=img.unsqueeze(0)
+    incomplete_img=img*(mask.eq(0.).float())
+    incomplete_img=incomplete_img.unsqueeze(0)
     masks=mask.unsqueeze(0)
-    _,x=gennet(imgs,masks)
+    _,x=gennet(incomplete_imgs,masks)
     predictions=x*masks+imgs # 1 x 3 x ih x iw
     return predictions[0]
 

@@ -21,13 +21,13 @@ import masker_ops as mo
 
 img_size=512 #size of input img
 epoch=20
-lr=0.00001
+lr=0.000001
 sgd_momentum=0.9
 weight_decay=0.0005
 
 MAX_ANN_PER_IMG=30
 
-batch_size=2 # num of img per batch
+batch_size=4 # num of img per batch
 r=64 #batch size for proposals from one img
 pos_threshold=0.5
 sample_size=512
@@ -389,7 +389,9 @@ def test_masker(img):
     if i==1:
         break
         '''
-    return maskss[0][counts_f[0]] # k x 1 ih x iw
+    maskss_valid=maskss[0][counts_f[0]] # k x 1 ih x iw
+    maskss_valid=maskss_valid.gt(0.5).float()
+    return maskss_valid
 
 def visualize_masks(img,bboxs,masks):
     '''

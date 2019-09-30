@@ -25,7 +25,9 @@ def slice_img(img):
     '''
     masks=test_masker(img) # k x 1 x ih x iw
     #randomly sample some mask and put them together
-    mask=
+    k=masks.shape[0]
+    sub_masks=masks.gather(dim=0,index=torch.randint(k,size=(min(3,k),)))
+    mask=sub_masks.sum(dim=0).gt(0.0).float() # 1 x ih x iw
     pred=test_painter(img,mask)
     return pred
 
@@ -37,7 +39,10 @@ def test_slice():
         imgs=img_batch['img'] # 1 x 3 x ih x iw
         imgs=imgs.to(device)
         pred=slice_img(imgs[0])
-
+        orig_img=tl.recover_img(img[0])
+        cv.display_img(orig_img)
+        pred_orig=tl.recover_img(pred)
+        cv.display_img(pred_orig)
 
 if __name__=='__main__':
     test_slice()
