@@ -389,7 +389,7 @@ def test_masker(img):
     if i==1:
         break
         '''
-    maskss_valid=maskss[0][counts_f[0]] # k x 1 ih x iw
+    maskss_valid=maskss[0][:counts_f[0]] # k x 1 x ih x iw
     maskss_valid=maskss_valid.gt(0.5).float()
     return maskss_valid
 
