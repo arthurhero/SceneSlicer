@@ -21,11 +21,11 @@ DeepFill is a state-of-the-art background inpainter.
 I trained both networks using MSCOCO dataset from scatch.
 
 ## Demo
-<img src="demo/1.jpg" alt="1" width="100" height="100" />
-![11](demo/11.jpg)
+<img src="demo/1.jpg" alt="1" width="200" height="200" />
+<img src="demo/11.jpg" alt="11" width="200" height="200" />
 
-![2](demo/2.jpg)
-![22](demo/22.jpg)
+<img src="demo/2.jpg" alt="2" width="200" height="200" />
+<img src="demo/22.jpg" alt="22" width="200" height="200" />
 
 ![3](demo/3.jpg)
 ![33](demo/33.jpg)
