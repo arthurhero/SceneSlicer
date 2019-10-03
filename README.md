@@ -22,6 +22,9 @@ I trained both networks using MSCOCO dataset from scatch.
 
 ## Demo
 <img src="demo/1.jpg" alt="1" width="200" height="200" /> <img src="demo/11.jpg" alt="11" width="200" height="200" />
+
 <img src="demo/2.jpg" alt="2" width="200" height="200" /> <img src="demo/22.jpg" alt="22" width="200" height="200" />
+
 <img src="demo/3.jpg" alt="3" width="200" height="200" /> <img src="demo/33.jpg" alt="33" width="200" height="200" /> <img src="demo/333.jpg" alt="333" width="200" height="200" />
+
 <img src="demo/4.jpg" alt="4" width="200" height="200" /> <img src="demo/44.jpg" alt="44" width="200" height="200" />
