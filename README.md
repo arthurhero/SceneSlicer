@@ -20,6 +20,10 @@ So far, RCNN-based networks are still in leading position regarding to accuracy 
 DeepFill is a state-of-the-art background inpainter. 
 I trained both networks using MSCOCO dataset from scatch.
 
+## Current Progress
+
+The inpainter still needs some improvement it seems...
+
 ## Demo
 <img src="demo/1.jpg" alt="1" width="200" height="200" /> <img src="demo/11.jpg" alt="11" width="200" height="200" />
 
