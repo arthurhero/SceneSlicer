@@ -26,8 +26,11 @@ def slice_img(img):
     masks=test_masker(img) # k x 1 x ih x iw
     #randomly sample some mask and put them together
     k=masks.shape[0]
-    print(masks.shape)
-    rand_index=torch.randint(k,size=(min(3,k),),device=device)
+    #print(masks.shape)
+    obj_num=1
+    rand_index=torch.randint(k,size=(min(obj_num,k),),device=device)
+    for i in range(len(rand_index)):
+        rand_index[i]=i
     print(rand_index)
     sub_masks=masks.index_select(dim=0,index=rand_index)
     mask=sub_masks.sum(dim=0).gt(0.0).float() # 1 x ih x iw
@@ -39,13 +42,18 @@ def test_slice():
     dataset=COCODataSet()
     dataloader=DataLoader(dataset,batch_size=1,shuffle=True,num_workers=1)
     for i,img_batch in enumerate(dataloader):
-        imgs=img_batch['img'] # 1 x 3 x ih x iw
-        imgs=imgs.to(device)
-        pred=slice_img(imgs[0])
-        orig_img=tl.recover_img(imgs[0])
+        img=img_batch['img'][0] # 3 x ih x iw
+        img=img.to(device)
+        orig_img=tl.recover_img(img)
         cv.display_img(orig_img)
-        pred_orig=tl.recover_img(pred)
-        cv.display_img(pred_orig)
+        for _ in range(5):
+            with torch.no_grad():
+                pred=slice_img(img)
+            pred_orig=tl.recover_img(pred)
+            cv.display_img(pred_orig)
+            img=pred
+            del pred
+            torch.cuda.empty_cache()
 
 if __name__=='__main__':
     test_slice()

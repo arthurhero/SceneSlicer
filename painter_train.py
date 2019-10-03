@@ -38,7 +38,7 @@ img_size=512
 epoch=100
 lr=0.000001
 l1_alpha=1
-l1_coarse_alpha=0.01
+l1_coarse_alpha=0.0001
 fm_alpha=0
 patch_alpha=0.005
 
@@ -273,7 +273,10 @@ def test_painter(img,mask):
     masks=mask.unsqueeze(0)
     _,x=gennet(incomplete_imgs,masks)
     predictions=x*masks+incomplete_imgs # 1 x 3 x ih x iw
+    del x
+    del gennet
+    torch.cuda.empty_cache()
     return predictions[0]
 
 if __name__=='__main__':
-    train_painter(max_ratio=0.20,pretrain=False,fix_coarse=False,ob=False)
+    train_painter(max_ratio=0.5,pretrain=False,fix_coarse=False,ob=False)

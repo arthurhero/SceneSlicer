@@ -21,7 +21,7 @@ import masker_ops as mo
 
 img_size=512 #size of input img
 epoch=20
-lr=0.000001
+lr=0.0000001
 sgd_momentum=0.9
 weight_decay=0.0005
 
@@ -260,8 +260,8 @@ def train_masker(step=1,fresh_fpn=True,visualize=False): # 4 step training
     else:
         mask_rcnn.rpn.apply(tl.freeze_params)
         mask_rcnn.class_generator.apply(tl.unfreeze_params)
-        #mask_rcnn.mask_generator.apply(tl.unfreeze_params)
-        mask_rcnn.mask_generator.apply(tl.freeze_params)
+        mask_rcnn.mask_generator.apply(tl.unfreeze_params)
+        #mask_rcnn.mask_generator.apply(tl.freeze_params)
 
     label_assigner=mo.AssignClsLabel(pos_threshold).to(device)
     optimizer = torch.optim.Adam(mask_rcnn.parameters(),lr=lr,betas=(0.5,0.9))
@@ -391,6 +391,9 @@ def test_masker(img):
         '''
     maskss_valid=maskss[0][:counts_f[0]] # k x 1 x ih x iw
     maskss_valid=maskss_valid.gt(0.5).float()
+    del scoress,bboxess,anchorss,maskss
+    del mask_rcnn
+    torch.cuda.empty_cache()
     return maskss_valid
 
 def visualize_masks(img,bboxs,masks):
